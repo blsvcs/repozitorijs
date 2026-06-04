@@ -14,6 +14,9 @@ on:
   schedule:
     - cron: '20 2 * * *'
 
+permissions:
+  contents: write
+
 jobs:
   build-pilot:
     runs-on: ubuntu-latest
@@ -22,6 +25,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -67,3 +72,15 @@ jobs:
           path: |
             pilot/pilot.sqlite
           retention-days: 30
+
+      - name: Publish pilot SQLite to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pilot/pilot.sqlite
+          if git diff --cached --quiet; then
+            echo "No pilot.sqlite changes to commit."
+          else
+            git commit -m "Update pilot SQLite dataset"
+            git push
+          fi

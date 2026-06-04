@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+psycopg
+python-dotenv
+requests
+pgvector

@@ -169,7 +169,6 @@ def import_csv_to_sqlite(csv_path: Path, conn: sqlite3.Connection) -> int:
             conn.executemany(sql, batch)
             count += len(batch)
 
-    conn.execute(f'CREATE INDEX IF NOT EXISTS idx_{TABLE_NAME}_rowid ON "{TABLE_NAME}" (rowid)')
     return count
 
 

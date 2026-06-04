@@ -1,31 +1,34 @@
 #!/usr/bin/env python3
 """
-Automatizēta anonimizēto nolēmumu izgūšana no DAGR CSV resursa.
+Automatizeta anonimizeto nolemumu izgusana no DAGR CSV resursa.
 
 Ko dara:
-1) Lejupielādē CSV no DAGR.
-2) Aprēķina faila SHA-256 hash un izlaiž importu, ja izmaiņu nav.
-3) Saglabā oriģinālo CSV arhīvā.
-4) Importē datus SQLite datubāzē.
-5) Izveido atsevišķu metadatu tabulu ar pēdējās sinhronizācijas informāciju.
+1) Lejupielade CSV no DAGR.
+2) Aprekina faila SHA-256 hash un izlaiž importu, ja izmainu nav.
+3) Saglaba originalo CSV arhiva.
+4) Importe datus SQLite datubaze.
+5) Izveido atsevisku metadatu tabulu ar pedejas sinhronizacijas informaciju.
 
 Palaist:
     python sync_anon_nolemumi.py
 
-Pēc noklusējuma rezultāti būs mapē ./data
+Pec noklusejuma rezultati bus mape ./data
 """
 
 from __future__ import annotations
 
 import csv
 import hashlib
+import http.client
 import os
 import sqlite3
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 DAGR_CSV_URL = "https://dagr.gov.lv/public/kkp_prod_anon_nolemumi?filename=kkp_prod_anon_nolemumi.csv"
@@ -33,18 +36,27 @@ DATA_DIR = Path(os.getenv("ANON_NOLEMUMI_DATA_DIR", "data"))
 DB_PATH = DATA_DIR / "anon_nolemumi.sqlite"
 ARCHIVE_DIR = DATA_DIR / "archive"
 TABLE_NAME = "anon_nolemumi"
-CHUNK_SIZE = 1024 * 1024
+CHUNK_SIZE = 256 * 1024
+MAX_DOWNLOAD_RETRIES = 5
+REQUEST_TIMEOUT_SECONDS = 300
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def download_file(url: str, dest: Path) -> str:
+def download_file_once(url: str, dest: Path) -> str:
     """Download URL to dest and return SHA-256 hash."""
     sha = hashlib.sha256()
-    req = Request(url, headers={"User-Agent": "anon-nolemumi-sync/1.0"})
-    with urlopen(req, timeout=120) as response, dest.open("wb") as f:
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "anon-nolemumi-sync/1.0",
+            "Accept": "text/csv,*/*",
+            "Connection": "close",
+        },
+    )
+    with urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as response, dest.open("wb") as f:
         while True:
             chunk = response.read(CHUNK_SIZE)
             if not chunk:
@@ -52,6 +64,31 @@ def download_file(url: str, dest: Path) -> str:
             sha.update(chunk)
             f.write(chunk)
     return sha.hexdigest()
+
+
+def download_file(url: str, dest: Path) -> str:
+    """Download with retries because the DAGR endpoint can close the stream early."""
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_DOWNLOAD_RETRIES + 1):
+        try:
+            if dest.exists():
+                dest.unlink()
+            print(f"Lejupielades meginajums {attempt}/{MAX_DOWNLOAD_RETRIES}...")
+            file_hash = download_file_once(url, dest)
+            size = dest.stat().st_size
+            if size == 0:
+                raise RuntimeError("Lejupieladets tukss fails")
+            print(f"Lejupielade izdevusies: {size} bytes")
+            return file_hash
+        except (http.client.IncompleteRead, HTTPError, URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            print(f"Lejupielade neizdevas: {type(exc).__name__}: {exc}", file=sys.stderr)
+            if attempt < MAX_DOWNLOAD_RETRIES:
+                sleep_seconds = min(60, 2 ** attempt)
+                print(f"Gaida {sleep_seconds}s un megina velreiz...")
+                time.sleep(sleep_seconds)
+
+    raise RuntimeError(f"Neizdevas lejupieladet pec {MAX_DOWNLOAD_RETRIES} meginajumiem: {last_error}")
 
 
 def get_last_hash(conn: sqlite3.Connection) -> str | None:
@@ -104,7 +141,7 @@ def import_csv_to_sqlite(csv_path: Path, conn: sqlite3.Connection) -> int:
         try:
             raw_header = next(reader)
         except StopIteration:
-            raise RuntimeError("CSV fails ir tukšs")
+            raise RuntimeError("CSV fails ir tukss")
 
         columns = unique_columns(raw_header)
         quoted_cols = ", ".join(f'"{c}" TEXT' for c in columns)
@@ -147,20 +184,20 @@ def main() -> int:
             tmp_path = Path(tmp.name)
 
         try:
-            print(f"Lejupielādēju: {DAGR_CSV_URL}")
+            print(f"Lejupieladeju: {DAGR_CSV_URL}")
             new_hash = download_file(DAGR_CSV_URL, tmp_path)
 
             if new_hash == last_hash:
                 set_meta(conn, "last_checked_at", utc_now_iso())
                 conn.commit()
-                print("Izmaiņu nav. Imports izlaists.")
+                print("Izmainu nav. Imports izlaists.")
                 return 0
 
             archive_name = f"kkp_prod_anon_nolemumi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             archive_path = ARCHIVE_DIR / archive_name
             tmp_path.replace(archive_path)
 
-            print("Importēju CSV SQLite datubāzē...")
+            print("Importeju CSV SQLite datubaze...")
             row_count = import_csv_to_sqlite(archive_path, conn)
 
             set_meta(conn, "last_sha256", new_hash)
@@ -170,8 +207,8 @@ def main() -> int:
             set_meta(conn, "source_url", DAGR_CSV_URL)
             conn.commit()
 
-            print(f"Gatavs. Importēti {row_count} ieraksti datubāzē: {DB_PATH}")
-            print(f"Arhīva fails: {archive_path}")
+            print(f"Gatavs. Importeti {row_count} ieraksti datubaze: {DB_PATH}")
+            print(f"Arhiva fails: {archive_path}")
             return 0
         finally:
             if tmp_path.exists():
@@ -182,5 +219,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"Kļūda: {exc}", file=sys.stderr)
+        print(f"Kluda: {exc}", file=sys.stderr)
         raise SystemExit(1)

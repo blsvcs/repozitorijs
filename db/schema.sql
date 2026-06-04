@@ -62,9 +62,11 @@ CREATE TABLE IF NOT EXISTS decision_embeddings (
     materialfileid UUID NOT NULL REFERENCES decisions(materialfileid) ON DELETE CASCADE,
     chunk_index INTEGER NOT NULL,
     chunk_text TEXT NOT NULL,
-    embedding vector(1536),
+    embedding vector(1024),
+    model_name TEXT NOT NULL DEFAULT 'BAAI/bge-m3',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE(materialfileid, chunk_index)
+    UNIQUE(materialfileid, chunk_index, model_name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_decision_embeddings_materialfileid ON decision_embeddings(materialfileid);
+CREATE INDEX IF NOT EXISTS idx_decision_embeddings_vector ON decision_embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);

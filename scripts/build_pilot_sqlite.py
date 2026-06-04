@@ -79,15 +79,44 @@ CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(download_status);
 """
 
 
+CSV_FIELD_ALIASES = {
+    "materialfileid": ["materialfileid", "MaterialFileId", "material_file_id"],
+    "court": ["court", "Court"],
+    "courtdepartment": ["courtdepartment", "CourtDepartment"],
+    "eclicode": ["eclicode", "EcliCode", "ECLICode"],
+    "casenumber": ["casenumber", "CaseNumber"],
+    "applicationnumber": ["applicationnumber", "ApplicationNumber"],
+    "processtype": ["processtype", "ProcessType"],
+    "processsubtype": ["processsubtype", "ProcessSubType"],
+    "materialtype": ["materialtype", "MaterialType"],
+    "registrationdate": ["registrationdate", "RegistrationDate"],
+    "status": ["status", "Status"],
+    "courtinstance": ["courtinstance", "CourtInstance"],
+    "downloadurl": ["downloadurl", "DownloadUrl", "download_url"],
+}
+
+
 def now_iso() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
 def norm(row: dict[str, str], key: str) -> str | None:
-    value = row.get(key)
+    aliases = CSV_FIELD_ALIASES.get(key, [key])
+    lower_map = {str(k).lower(): k for k in row.keys()}
+
+    value = None
+    for alias in aliases:
+        if alias in row:
+            value = row.get(alias)
+            break
+        actual_key = lower_map.get(alias.lower())
+        if actual_key is not None:
+            value = row.get(actual_key)
+            break
+
     if value is None:
         return None
-    value = value.strip()
+    value = str(value).strip()
     return value or None
 
 
@@ -103,14 +132,18 @@ def import_metadata(conn: sqlite3.Connection, csv_path: Path, target_total: int)
 
     remaining = target_total - existing
     imported = 0
+    skipped_missing_required = 0
+
     with csv_path.open("r", encoding="utf-8-sig", newline="", errors="replace") as f:
         reader = csv.DictReader(f)
+        print(f"CSV columns: {reader.fieldnames}")
         for row in reader:
             materialfileid = norm(row, "materialfileid")
             downloadurl = norm(row, "downloadurl")
             if not materialfileid or not downloadurl:
+                skipped_missing_required += 1
                 continue
-            conn.execute(
+            cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO decisions (
                     materialfileid, court, courtdepartment, eclicode, casenumber,
@@ -134,11 +167,12 @@ def import_metadata(conn: sqlite3.Connection, csv_path: Path, target_total: int)
                     downloadurl,
                 ),
             )
-            if conn.total_changes:
+            if cur.rowcount == 1:
                 imported += 1
             if imported >= remaining:
                 break
     conn.commit()
+    print(f"Skipped rows without materialfileid/downloadurl: {skipped_missing_required}")
     return imported
 
 

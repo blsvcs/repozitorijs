@@ -2,21 +2,24 @@ from __future__ import annotations
 
 import os
 from functools import lru_cache
-from typing import Iterable
+from typing import Iterable, Any
 
 from fastapi import FastAPI, HTTPException, Query
-from sentence_transformers import SentenceTransformer
 
 from app.db import get_conn
 
 MODEL_NAME = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
 MODEL_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
 
-app = FastAPI(title="Anonimizeto nolemumu API", version="0.2.0")
+app = FastAPI(title="Anonimizeto nolemumu API", version="0.2.1")
 
 
 @lru_cache(maxsize=1)
-def get_embedding_model() -> SentenceTransformer:
+def get_embedding_model() -> Any:
+    # Lazy import so non-AI endpoints can start even before sentence-transformers
+    # and the local model are installed/downloaded.
+    from sentence_transformers import SentenceTransformer
+
     return SentenceTransformer(MODEL_NAME, device=MODEL_DEVICE)
 
 
@@ -25,9 +28,17 @@ def vector_to_pg(values: Iterable[float]) -> str:
 
 
 def embed_query(text: str) -> str:
-    model = get_embedding_model()
-    embedding = model.encode([text], normalize_embeddings=True, show_progress_bar=False)[0]
-    return vector_to_pg(embedding)
+    try:
+        model = get_embedding_model()
+        embedding = model.encode([text], normalize_embeddings=True, show_progress_bar=False)[0]
+        return vector_to_pg(embedding)
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="sentence-transformers nav instalets. Palaidiet: pip install -r requirements.txt",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Embedding modelis nav pieejams: {exc}") from exc
 
 
 @app.get("/health")

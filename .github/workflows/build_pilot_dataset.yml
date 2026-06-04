@@ -1,0 +1,69 @@
+name: Build pilot dataset
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_total:
+        description: 'Target total metadata rows in pilot database'
+        required: false
+        default: '10000'
+      batch_size:
+        description: 'How many PDFs to download/extract in this run'
+        required: false
+        default: '500'
+  schedule:
+    - cron: '20 2 * * *'
+
+jobs:
+  build-pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pypdf
+
+      - name: Download latest metadata CSV
+        run: |
+          python sync_anon_nolemumi.py
+
+      - name: Restore previous pilot artifact if available
+        uses: dawidd6/action-download-artifact@v6
+        continue-on-error: true
+        with:
+          workflow: build_pilot_dataset.yml
+          name: pilot-dataset
+          path: previous-pilot
+          if_no_artifact_found: ignore
+
+      - name: Reuse previous pilot database
+        run: |
+          mkdir -p pilot
+          if [ -f previous-pilot/pilot.sqlite ]; then
+            cp previous-pilot/pilot.sqlite pilot/pilot.sqlite
+          fi
+
+      - name: Build pilot SQLite database
+        run: |
+          CSV_FILE=$(ls -t data/archive/*.csv | head -n 1)
+          TARGET_TOTAL="${{ github.event.inputs.target_total || '10000' }}"
+          BATCH_SIZE="${{ github.event.inputs.batch_size || '500' }}"
+          python scripts/build_pilot_sqlite.py "$CSV_FILE" --target-total "$TARGET_TOTAL" --batch-size "$BATCH_SIZE" --sleep 0.2
+
+      - name: Upload pilot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilot-dataset
+          path: |
+            pilot/pilot.sqlite
+          retention-days: 30

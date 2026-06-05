@@ -21,14 +21,55 @@ def clean_fts_query(query: str) -> str:
     return " ".join(words)
 
 
-def clean_snippet(value: str | None) -> str:
+def plain_text(value: str | None) -> str:
     if not value:
         return ""
     value = value.replace("\n", " ")
     value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def clean_snippet(value: str | None) -> str:
+    value = plain_text(value)
+    if not value:
+        return ""
     value = html.escape(value)
     value = value.replace("[", "<mark>").replace("]", "</mark>")
     return value
+
+
+def make_essence(row: dict, snippet: str, full_text: str) -> str:
+    text = plain_text((full_text or snippet)[:3000]).lower()
+    material_type = row.get("materialtype") or ""
+    process = row.get("processtype") or ""
+
+    if any(w in text for w in ["kredīt", "aizdev", "parād", "procent"]):
+        topic = "Strīds par kredīta, aizdevuma, parāda vai procentu piedziņu."
+    elif any(w in text for w in ["darba līgum", "darba samaks", "atlaišan"]):
+        topic = "Strīds saistīts ar darba tiesiskajām attiecībām."
+    elif any(w in text for w in ["būvniec", "būvatļauj", "būvvald", "teritorijas plānojum"]):
+        topic = "Strīds saistīts ar būvniecību vai teritorijas plānošanu."
+    elif any(w in text for w in ["iepirkum", "piedāvājum", "pretendent", "pasūtītāj"]):
+        topic = "Strīds saistīts ar publisko iepirkumu."
+    elif any(w in text for w in ["uzturlīdzek", "laulīb", "aizgādīb", "saskarsmes tiesīb"]):
+        topic = "Strīds saistīts ar ģimenes tiesībām."
+    elif process:
+        topic = f"Lieta saistīta ar procesu: {process}."
+    else:
+        topic = "Lietas būtība automātiski nosakāma pēc fragmenta un pilnā teksta."
+
+    if "prasība apmierināta" in text or "prasību apmierināt" in text:
+        result = "Rezultāts: prasība apmierināta."
+    elif "prasība noraidīta" in text or "prasību noraidīt" in text:
+        result = "Rezultāts: prasība noraidīta."
+    elif "daļēji apmierin" in text:
+        result = "Rezultāts: prasība apmierināta daļēji."
+    elif material_type:
+        result = f"Nolēmuma veids: {material_type}."
+    else:
+        result = "Rezultāts automātiski nav droši nosakāms."
+
+    return topic + " " + result
 
 
 @st.cache_data(show_spinner=False)
@@ -103,34 +144,12 @@ def get_full_text(db_path: str, materialfileid: str) -> str:
 st.markdown(
     """
     <style>
-    mark {
-        background-color: #fff3a3;
-        padding: 0.05rem 0.18rem;
-        border-radius: 0.2rem;
-    }
-    .result-card {
-        border: 1px solid #e6e8ef;
-        border-radius: 0.75rem;
-        padding: 1rem 1.1rem;
-        margin-bottom: 0.85rem;
-        background: #ffffff;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-    }
-    .result-title {
-        font-size: 1.05rem;
-        font-weight: 700;
-        margin-bottom: 0.25rem;
-    }
-    .result-meta {
-        color: #5f6673;
-        font-size: 0.92rem;
-        margin-bottom: 0.65rem;
-    }
-    .result-snippet {
-        font-size: 1rem;
-        line-height: 1.55;
-        color: #242936;
-    }
+    mark { background-color: #fff3a3; padding: 0.05rem 0.18rem; border-radius: 0.2rem; }
+    .result-card { border: 1px solid #e6e8ef; border-radius: 0.75rem; padding: 1rem 1.1rem; margin-bottom: 0.85rem; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+    .result-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .result-meta { color: #5f6673; font-size: 0.92rem; margin-bottom: 0.65rem; }
+    .result-essence { background: #f6f8fb; border-left: 4px solid #7c9cff; border-radius: 0.45rem; padding: 0.75rem 0.85rem; margin-bottom: 0.75rem; line-height: 1.45; }
+    .result-snippet { font-size: 1rem; line-height: 1.55; color: #242936; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -178,16 +197,18 @@ for index, row in enumerate(rows, start=1):
     date = row.get("registrationdate") or "-"
     process = row.get("processtype") or "-"
     material_type = row.get("materialtype") or "-"
-    snippet = clean_snippet(row.get("snippet")) or "Fragments nav pieejams."
+    raw_snippet = row.get("snippet") or ""
+    snippet = clean_snippet(raw_snippet) or "Fragments nav pieejams."
+    full_text = get_full_text(str(DB_PATH), row["materialfileid"])
+    essence = make_essence(row, raw_snippet, full_text)
 
     st.markdown(
         f"""
         <div class="result-card">
             <div class="result-title">#{index} · Lieta {html.escape(case_number)}</div>
-            <div class="result-meta">
-                {html.escape(court_name)} · {html.escape(str(date))} · {html.escape(process)} · {html.escape(material_type)}
-            </div>
-            <div class="result-snippet">“{snippet}”</div>
+            <div class="result-meta">{html.escape(court_name)} · {html.escape(str(date))} · {html.escape(process)} · {html.escape(material_type)}</div>
+            <div class="result-essence"><strong>Būtība:</strong><br>{html.escape(essence)}</div>
+            <div class="result-snippet"><strong>Fragments:</strong><br>“{snippet}”</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -195,7 +216,6 @@ for index, row in enumerate(rows, start=1):
 
     with st.expander("Atvērt pilnu nolēmuma tekstu"):
         st.write(f"**MaterialFileId:** `{row.get('materialfileid')}`")
-        full_text = get_full_text(str(DB_PATH), row["materialfileid"])
         if full_text:
             st.text_area("Pilns nolēmuma teksts", full_text[:100000], height=500)
         else:

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import html
 import re
 import sqlite3
 from pathlib import Path
 
-import pandas as pd
 import streamlit as st
 
 DB_PATH = Path("pilot/pilot.sqlite")
@@ -19,6 +19,16 @@ st.set_page_config(
 def clean_fts_query(query: str) -> str:
     words = re.findall(r"[\wāčēģīķļņšūžĀČĒĢĪĶĻŅŠŪŽ]+", query, flags=re.UNICODE)
     return " ".join(words)
+
+
+def clean_snippet(value: str | None) -> str:
+    if not value:
+        return ""
+    value = value.replace("\n", " ")
+    value = re.sub(r"\s+", " ", value).strip()
+    value = html.escape(value)
+    value = value.replace("[", "<mark>").replace("]", "</mark>")
+    return value
 
 
 @st.cache_data(show_spinner=False)
@@ -67,7 +77,7 @@ def search_decisions(db_path: str, query: str, court: str | None, limit: int):
             d.processtype,
             d.materialtype,
             d.registrationdate,
-            snippet(documents_fts, 3, '[', ']', ' ... ', 28) AS snippet,
+            snippet(documents_fts, 3, '[', ']', ' ... ', 42) AS snippet,
             bm25(documents_fts) AS rank
         FROM documents_fts
         JOIN decisions d ON d.materialfileid = documents_fts.materialfileid
@@ -89,6 +99,42 @@ def get_full_text(db_path: str, materialfileid: str) -> str:
         ).fetchone()
     return row[0] if row and row[0] else ""
 
+
+st.markdown(
+    """
+    <style>
+    mark {
+        background-color: #fff3a3;
+        padding: 0.05rem 0.18rem;
+        border-radius: 0.2rem;
+    }
+    .result-card {
+        border: 1px solid #e6e8ef;
+        border-radius: 0.75rem;
+        padding: 1rem 1.1rem;
+        margin-bottom: 0.85rem;
+        background: #ffffff;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+    }
+    .result-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin-bottom: 0.25rem;
+    }
+    .result-meta {
+        color: #5f6673;
+        font-size: 0.92rem;
+        margin-bottom: 0.65rem;
+    }
+    .result-snippet {
+        font-size: 1rem;
+        line-height: 1.55;
+        color: #242936;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.title("⚖️ Latvijas tiesu nolēmumu pilots")
 st.caption("GitHub-only MVP: SQLite datubāze, PDF teksta ekstrakcija un pilnteksta meklēšana.")
@@ -126,33 +172,31 @@ if not rows:
     st.warning("Nav rezultātu. Pamēģini īsāku vai citu meklēšanas frāzi.")
     st.stop()
 
-summary_df = pd.DataFrame(
-    [
-        {
-            "Lietas numurs": row.get("casenumber"),
-            "Tiesa": row.get("court"),
-            "Datums": row.get("registrationdate"),
-            "Process": row.get("processtype"),
-            "Veids": row.get("materialtype"),
-        }
-        for row in rows
-    ]
-)
-st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
 for index, row in enumerate(rows, start=1):
-    title = f"#{index} · {row.get('casenumber') or 'Bez lietas numura'} · {row.get('court') or '-'}"
-    with st.expander(title):
-        st.write(f"**Datums:** {row.get('registrationdate') or '-'}")
-        st.write(f"**Process:** {row.get('processtype') or '-'}")
-        st.write(f"**Nolēmuma veids:** {row.get('materialtype') or '-'}")
-        st.write(f"**MaterialFileId:** `{row.get('materialfileid')}`")
-        st.markdown("**Fragments:**")
-        st.write((row.get("snippet") or "").replace("\n", " "))
+    case_number = row.get("casenumber") or "Bez lietas numura"
+    court_name = row.get("court") or "-"
+    date = row.get("registrationdate") or "-"
+    process = row.get("processtype") or "-"
+    material_type = row.get("materialtype") or "-"
+    snippet = clean_snippet(row.get("snippet")) or "Fragments nav pieejams."
 
-        if st.button("Parādīt pilnu tekstu", key=f"full_{row.get('materialfileid')}"):
-            full_text = get_full_text(str(DB_PATH), row["materialfileid"])
-            if full_text:
-                st.text_area("Pilns nolēmuma teksts", full_text[:100000], height=500)
-            else:
-                st.warning("Šim ierakstam pilns teksts nav pieejams.")
+    st.markdown(
+        f"""
+        <div class="result-card">
+            <div class="result-title">#{index} · Lieta {html.escape(case_number)}</div>
+            <div class="result-meta">
+                {html.escape(court_name)} · {html.escape(str(date))} · {html.escape(process)} · {html.escape(material_type)}
+            </div>
+            <div class="result-snippet">“{snippet}”</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("Atvērt pilnu nolēmuma tekstu"):
+        st.write(f"**MaterialFileId:** `{row.get('materialfileid')}`")
+        full_text = get_full_text(str(DB_PATH), row["materialfileid"])
+        if full_text:
+            st.text_area("Pilns nolēmuma teksts", full_text[:100000], height=500)
+        else:
+            st.warning("Šim ierakstam pilns teksts nav pieejams.")

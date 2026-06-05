@@ -6,3 +6,6 @@ requests
 pgvector
 pypdf
 sentence-transformers
+streamlit
+pandas
+openai

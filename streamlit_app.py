@@ -104,25 +104,13 @@ def trend_data(db: str, topic: str | None = None) -> tuple[pd.DataFrame, pd.Data
         with sqlite3.connect(db) as conn:
             topic_where = "where t.topic = ?" if topic else ""
             params = (topic,) if topic else ()
-            by_topic = pd.read_sql_query(
-                """
-                select t.topic as Tēma, count(*) as Skaits
-                from case_topics t
-                group by t.topic
-                order by Skaits desc
-                limit 15
-                """,
-                conn,
-            )
+            by_topic = pd.read_sql_query("select topic as Tēma, count(*) as Skaits from case_topics group by topic order by Skaits desc limit 15", conn)
             by_year = pd.read_sql_query(
                 f"""
-                select substr(d.registrationdate, 1, 4) as Gads, count(*) as Skaits
-                from decisions d
-                join case_topics t on t.materialfileid=d.materialfileid
+                select substr(d.registrationdate,1,4) as Gads, count(*) as Skaits
+                from decisions d join case_topics t on t.materialfileid=d.materialfileid
                 {topic_where}
-                group by Gads
-                having Gads is not null and Gads <> ''
-                order by Gads
+                group by Gads having Gads is not null and Gads<>'' order by Gads
                 """,
                 conn,
                 params=params,
@@ -130,13 +118,9 @@ def trend_data(db: str, topic: str | None = None) -> tuple[pd.DataFrame, pd.Data
             by_court = pd.read_sql_query(
                 f"""
                 select d.court as Tiesa, count(*) as Skaits
-                from decisions d
-                join case_topics t on t.materialfileid=d.materialfileid
+                from decisions d join case_topics t on t.materialfileid=d.materialfileid
                 {topic_where}
-                group by d.court
-                having Tiesa is not null and Tiesa <> ''
-                order by Skaits desc
-                limit 15
+                group by d.court having Tiesa is not null and Tiesa<>'' order by Skaits desc limit 15
                 """,
                 conn,
                 params=params,
@@ -202,6 +186,18 @@ def search(db: str, query: str, court: str | None, topic: str | None, limit: int
 
 
 @st.cache_data(show_spinner=False)
+def answer_question(db: str, question: str, topic: str | None, limit: int = 5) -> list[dict]:
+    rows = search(db, question, None, topic, limit)
+    for row in rows:
+        ai = ai_summary(db, row["materialfileid"])
+        if ai and ai.get("summary"):
+            row["answer_text"] = ai["summary"]
+        else:
+            row["answer_text"] = clean_text(row.get("snippet"))
+    return rows
+
+
+@st.cache_data(show_spinner=False)
 def full_text(db: str, materialfileid: str) -> str:
     with sqlite3.connect(db) as conn:
         row = conn.execute("select extracted_text from documents where materialfileid=?", (materialfileid,)).fetchone()
@@ -213,10 +209,7 @@ def ai_summary(db: str, materialfileid: str) -> dict | None:
     try:
         with sqlite3.connect(db) as conn:
             conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "select summary, legal_issue, court_reasoning, outcome from ai_summaries where materialfileid=? and error_message is null",
-                (materialfileid,),
-            ).fetchone()
+            row = conn.execute("select summary, legal_issue, court_reasoning, outcome from ai_summaries where materialfileid=? and error_message is null", (materialfileid,)).fetchone()
     except sqlite3.OperationalError:
         return None
     return dict(row) if row else None
@@ -244,7 +237,6 @@ def similar_cases(db: str, materialfileid: str, limit: int = 5) -> list[dict]:
             ).fetchall()
     except sqlite3.OperationalError:
         return []
-
     scored = []
     for r in rows:
         vec = np.frombuffer(r["embedding"], dtype=np.float32)
@@ -289,7 +281,7 @@ mark{background:#fff3a3;padding:.05rem .18rem;border-radius:.2rem}.card{border:1
 """, unsafe_allow_html=True)
 
 st.title("⚖️ Latvijas tiesu nolēmumu pilots")
-st.caption("SQLite, pilnteksta meklēšana, AI kopsavilkumi, PDF, tēmas, tendences un līdzīgo lietu meklēšana.")
+st.caption("SQLite, pilnteksta meklēšana, AI kopsavilkumi, PDF, tēmas, tendences, jautājumi un līdzīgo lietu meklēšana.")
 
 if not DB_PATH.exists():
     st.error(f"Datubāze nav atrasta: `{DB_PATH}`")
@@ -300,7 +292,29 @@ c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 c1.metric("Metadati", s["metadata"]); c2.metric("Dokumenti", s["documents"]); c3.metric("Lejupielādēti", s["downloaded"])
 c4.metric("Ar tekstu", s["with_text"]); c5.metric("AI", s["ai"]); c6.metric("Semantika", s["semantic"]); c7.metric("Tēmas", s["topics"])
 
-with st.expander("📊 Tiesu prakses tendences", expanded=True):
+with st.expander("💬 Jautājums nolēmumu datubāzei", expanded=True):
+    qa_col1, qa_col2 = st.columns([3, 1])
+    with qa_col1:
+        question = st.text_input("Jautājums", placeholder="piemēram: Kāda ir tiesu prakse par kredīta procentu piedziņu?")
+    with qa_col2:
+        qa_topic_choice = st.selectbox("Jautājuma tēma", ["Visas"] + topics(str(DB_PATH)), key="qa_topic")
+    if question:
+        qa_topic = None if qa_topic_choice == "Visas" else qa_topic_choice
+        answers = answer_question(str(DB_PATH), question, qa_topic, 5)
+        if not answers:
+            st.warning("Nav atrasti pietiekami atbilstoši nolēmumi. Pamēģini īsāku jautājumu vai noņem tēmas filtru.")
+        else:
+            st.markdown("**Īsa sintēze no atrastajiem avotiem:**")
+            for n, ans in enumerate(answers, 1):
+                st.markdown(f"{n}. {ans.get('answer_text') or 'Avotā pieejams fragments, bet kopsavilkums vēl nav sagatavots.'}")
+            st.markdown("**Avoti:**")
+            for ans in answers:
+                title = ans.get("casenumber") or ans.get("materialfileid")
+                st.markdown(f"**{title}** · {ans.get('court') or '-'} · {ans.get('registrationdate') or '-'} · {ans.get('topic') or 'Bez tēmas'}")
+                if ans.get("downloadurl"):
+                    st.link_button("📄 Atvērt avota PDF", ans["downloadurl"], key=f"qa-pdf-{ans['materialfileid']}")
+
+with st.expander("📊 Tiesu prakses tendences", expanded=False):
     trend_topic = st.selectbox("Tendences tēma", ["Visas"] + topics(str(DB_PATH)), key="trend_topic")
     selected_trend_topic = None if trend_topic == "Visas" else trend_topic
     by_topic, by_year, by_court = trend_data(str(DB_PATH), selected_trend_topic)
@@ -336,11 +350,7 @@ if similar_lookup:
     if not source_case:
         st.warning("Lieta nav atrasta pēc ievadītā lietas numura vai MaterialFileId.")
     else:
-        st.markdown(
-            f"**Avota lieta:** {source_case.get('casenumber') or source_case['materialfileid']}  \n"
-            f"{source_case.get('court') or '-'} · {source_case.get('registrationdate') or '-'} · "
-            f"{source_case.get('processtype') or '-'} · {source_case.get('materialtype') or '-'} · {source_case.get('topic') or 'Bez tēmas'}"
-        )
+        st.markdown(f"**Avota lieta:** {source_case.get('casenumber') or source_case['materialfileid']}  \n{source_case.get('court') or '-'} · {source_case.get('registrationdate') or '-'} · {source_case.get('processtype') or '-'} · {source_case.get('materialtype') or '-'} · {source_case.get('topic') or 'Bez tēmas'}")
         if source_case.get("downloadurl"):
             st.link_button("📄 Atvērt avota PDF", source_case["downloadurl"])
         render_similar_list(source_case["materialfileid"], similar_cases(str(DB_PATH), source_case["materialfileid"], similar_limit))

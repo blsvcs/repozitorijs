@@ -190,11 +190,49 @@ def answer_question(db: str, question: str, topic: str | None, limit: int = 5) -
     rows = search(db, question, None, topic, limit)
     for row in rows:
         ai = ai_summary(db, row["materialfileid"])
-        if ai and ai.get("summary"):
-            row["answer_text"] = ai["summary"]
-        else:
-            row["answer_text"] = clean_text(row.get("snippet"))
+        row["answer_text"] = ai["summary"] if ai and ai.get("summary") else clean_text(row.get("snippet"))
     return rows
+
+
+def build_smart_report(question: str, answers: list[dict]) -> str:
+    lines = [
+        "# Gudrais ziņojums par tiesu praksi",
+        "",
+        f"**Jautājums:** {question}",
+        "",
+        "## Īss secinājums",
+        "Zemāk apkopoti atlasītie nolēmumi, kas datubāzē atrasti kā atbilstošākie pēc jautājuma teksta. Šis ir sākotnējs automātisks pārskats; pirms izmantošanas juridiskā darbā jāpārbauda oriģinālie nolēmumi.",
+        "",
+        "## Galvenie novērojumi",
+    ]
+    if not answers:
+        lines.append("Nav atrasti pietiekami atbilstoši nolēmumi.")
+    else:
+        topic_counts: dict[str, int] = {}
+        for item in answers:
+            topic = item.get("topic") or "Bez tēmas"
+            topic_counts[topic] = topic_counts.get(topic, 0) + 1
+        for topic, count in sorted(topic_counts.items(), key=lambda x: x[1], reverse=True):
+            lines.append(f"- {topic}: {count} atlasīti nolēmumi.")
+
+    lines += ["", "## Atlasīto nolēmumu kopsavilkumi"]
+    for i, item in enumerate(answers, 1):
+        title = item.get("casenumber") or item.get("materialfileid")
+        lines += [
+            "",
+            f"### {i}. Lieta {title}",
+            f"- Tiesa: {item.get('court') or '-'}",
+            f"- Datums: {item.get('registrationdate') or '-'}",
+            f"- Tēma: {item.get('topic') or 'Bez tēmas'}",
+            f"- Nolēmuma veids: {item.get('materialtype') or '-'}",
+            "",
+            item.get("answer_text") or "Kopsavilkums vēl nav pieejams; skatīt oriģinālo fragmentu vai PDF.",
+        ]
+    lines += ["", "## Avoti"]
+    for item in answers:
+        title = item.get("casenumber") or item.get("materialfileid")
+        lines.append(f"- {title} — {item.get('court') or '-'} — {item.get('registrationdate') or '-'}")
+    return "\n".join(lines)
 
 
 @st.cache_data(show_spinner=False)
@@ -281,7 +319,7 @@ mark{background:#fff3a3;padding:.05rem .18rem;border-radius:.2rem}.card{border:1
 """, unsafe_allow_html=True)
 
 st.title("⚖️ Latvijas tiesu nolēmumu pilots")
-st.caption("SQLite, pilnteksta meklēšana, AI kopsavilkumi, PDF, tēmas, tendences, jautājumi un līdzīgo lietu meklēšana.")
+st.caption("SQLite, pilnteksta meklēšana, AI kopsavilkumi, PDF, tēmas, tendences, jautājumi, ziņojumi un līdzīgo lietu meklēšana.")
 
 if not DB_PATH.exists():
     st.error(f"Datubāze nav atrasta: `{DB_PATH}`")
@@ -300,13 +338,17 @@ with st.expander("💬 Jautājums nolēmumu datubāzei", expanded=True):
         qa_topic_choice = st.selectbox("Jautājuma tēma", ["Visas"] + topics(str(DB_PATH)), key="qa_topic")
     if question:
         qa_topic = None if qa_topic_choice == "Visas" else qa_topic_choice
-        answers = answer_question(str(DB_PATH), question, qa_topic, 5)
+        answers = answer_question(str(DB_PATH), question, qa_topic, 8)
         if not answers:
             st.warning("Nav atrasti pietiekami atbilstoši nolēmumi. Pamēģini īsāku jautājumu vai noņem tēmas filtru.")
         else:
             st.markdown("**Īsa sintēze no atrastajiem avotiem:**")
-            for n, ans in enumerate(answers, 1):
+            for n, ans in enumerate(answers[:5], 1):
                 st.markdown(f"{n}. {ans.get('answer_text') or 'Avotā pieejams fragments, bet kopsavilkums vēl nav sagatavots.'}")
+            report = build_smart_report(question, answers)
+            with st.expander("🧾 Gudrais ziņojums"):
+                st.download_button("⬇️ Lejupielādēt Markdown ziņojumu", report, file_name="gudrais_zinojums.md", mime="text/markdown")
+                st.text_area("Ziņojuma teksts", report, height=520)
             st.markdown("**Avoti:**")
             for ans in answers:
                 title = ans.get("casenumber") or ans.get("materialfileid")

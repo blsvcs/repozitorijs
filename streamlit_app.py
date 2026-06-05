@@ -118,6 +118,7 @@ def search_decisions(db_path: str, query: str, court: str | None, limit: int):
             d.processtype,
             d.materialtype,
             d.registrationdate,
+            d.downloadurl,
             snippet(documents_fts, 3, '[', ']', ' ... ', 42) AS snippet,
             bm25(documents_fts) AS rank
         FROM documents_fts
@@ -197,6 +198,7 @@ for index, row in enumerate(rows, start=1):
     date = row.get("registrationdate") or "-"
     process = row.get("processtype") or "-"
     material_type = row.get("materialtype") or "-"
+    download_url = row.get("downloadurl") or ""
     raw_snippet = row.get("snippet") or ""
     snippet = clean_snippet(raw_snippet) or "Fragments nav pieejams."
     full_text = get_full_text(str(DB_PATH), row["materialfileid"])
@@ -214,9 +216,17 @@ for index, row in enumerate(rows, start=1):
         unsafe_allow_html=True,
     )
 
-    with st.expander("Atvērt pilnu nolēmuma tekstu"):
-        st.write(f"**MaterialFileId:** `{row.get('materialfileid')}`")
-        if full_text:
-            st.text_area("Pilns nolēmuma teksts", full_text[:100000], height=500)
+    col_pdf, col_text = st.columns([1, 3])
+    with col_pdf:
+        if download_url:
+            st.link_button("📄 Atvērt PDF", download_url)
         else:
-            st.warning("Šim ierakstam pilns teksts nav pieejams.")
+            st.caption("PDF saite nav pieejama")
+
+    with col_text:
+        with st.expander("Atvērt pilnu nolēmuma tekstu"):
+            st.write(f"**MaterialFileId:** `{row.get('materialfileid')}`")
+            if full_text:
+                st.text_area("Pilns nolēmuma teksts", full_text[:100000], height=500)
+            else:
+                st.warning("Šim ierakstam pilns teksts nav pieejams.")

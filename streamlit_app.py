@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 
 DB_PATH = Path("pilot/pilot.sqlite")
@@ -68,18 +69,15 @@ def stats(db: str) -> dict[str, int]:
             "semantic": 0,
             "topics": 0,
         }
-        try:
-            out["ai"] = conn.execute("select count(*) from ai_summaries where error_message is null").fetchone()[0]
-        except sqlite3.OperationalError:
-            pass
-        try:
-            out["semantic"] = conn.execute("select count(*) from semantic_embeddings").fetchone()[0]
-        except sqlite3.OperationalError:
-            pass
-        try:
-            out["topics"] = conn.execute("select count(*) from case_topics").fetchone()[0]
-        except sqlite3.OperationalError:
-            pass
+        for key, sql in {
+            "ai": "select count(*) from ai_summaries where error_message is null",
+            "semantic": "select count(*) from semantic_embeddings",
+            "topics": "select count(*) from case_topics",
+        }.items():
+            try:
+                out[key] = conn.execute(sql).fetchone()[0]
+            except sqlite3.OperationalError:
+                pass
         return out
 
 
@@ -98,6 +96,54 @@ def topics(db: str) -> list[str]:
         return [r[0] for r in rows]
     except sqlite3.OperationalError:
         return []
+
+
+@st.cache_data(show_spinner=False)
+def trend_data(db: str, topic: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    try:
+        with sqlite3.connect(db) as conn:
+            topic_where = "where t.topic = ?" if topic else ""
+            params = (topic,) if topic else ()
+            by_topic = pd.read_sql_query(
+                """
+                select t.topic as Tēma, count(*) as Skaits
+                from case_topics t
+                group by t.topic
+                order by Skaits desc
+                limit 15
+                """,
+                conn,
+            )
+            by_year = pd.read_sql_query(
+                f"""
+                select substr(d.registrationdate, 1, 4) as Gads, count(*) as Skaits
+                from decisions d
+                join case_topics t on t.materialfileid=d.materialfileid
+                {topic_where}
+                group by Gads
+                having Gads is not null and Gads <> ''
+                order by Gads
+                """,
+                conn,
+                params=params,
+            )
+            by_court = pd.read_sql_query(
+                f"""
+                select d.court as Tiesa, count(*) as Skaits
+                from decisions d
+                join case_topics t on t.materialfileid=d.materialfileid
+                {topic_where}
+                group by d.court
+                having Tiesa is not null and Tiesa <> ''
+                order by Skaits desc
+                limit 15
+                """,
+                conn,
+                params=params,
+            )
+        return by_topic, by_year, by_court
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False)
@@ -243,7 +289,7 @@ mark{background:#fff3a3;padding:.05rem .18rem;border-radius:.2rem}.card{border:1
 """, unsafe_allow_html=True)
 
 st.title("⚖️ Latvijas tiesu nolēmumu pilots")
-st.caption("SQLite, pilnteksta meklēšana, AI kopsavilkumi, PDF, tēmas un līdzīgo lietu meklēšana.")
+st.caption("SQLite, pilnteksta meklēšana, AI kopsavilkumi, PDF, tēmas, tendences un līdzīgo lietu meklēšana.")
 
 if not DB_PATH.exists():
     st.error(f"Datubāze nav atrasta: `{DB_PATH}`")
@@ -253,6 +299,30 @@ s = stats(str(DB_PATH))
 c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 c1.metric("Metadati", s["metadata"]); c2.metric("Dokumenti", s["documents"]); c3.metric("Lejupielādēti", s["downloaded"])
 c4.metric("Ar tekstu", s["with_text"]); c5.metric("AI", s["ai"]); c6.metric("Semantika", s["semantic"]); c7.metric("Tēmas", s["topics"])
+
+with st.expander("📊 Tiesu prakses tendences", expanded=True):
+    trend_topic = st.selectbox("Tendences tēma", ["Visas"] + topics(str(DB_PATH)), key="trend_topic")
+    selected_trend_topic = None if trend_topic == "Visas" else trend_topic
+    by_topic, by_year, by_court = trend_data(str(DB_PATH), selected_trend_topic)
+    t1, t2, t3 = st.tabs(["Tēmas", "Gadi", "Tiesas"])
+    with t1:
+        if by_topic.empty:
+            st.info("Tēmu statistika vēl nav pieejama. Palaid `python scripts/classify_topics.py --limit 1500`.")
+        else:
+            st.bar_chart(by_topic.set_index("Tēma"))
+            st.dataframe(by_topic, use_container_width=True)
+    with t2:
+        if by_year.empty:
+            st.info("Gadu statistika vēl nav pieejama.")
+        else:
+            st.line_chart(by_year.set_index("Gads"))
+            st.dataframe(by_year, use_container_width=True)
+    with t3:
+        if by_court.empty:
+            st.info("Tiesu statistika vēl nav pieejama.")
+        else:
+            st.bar_chart(by_court.set_index("Tiesa"))
+            st.dataframe(by_court, use_container_width=True)
 
 st.subheader("🔎 Līdzīgas lietas pēc būtības")
 sim_col1, sim_col2 = st.columns([3, 1])

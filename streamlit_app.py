@@ -75,12 +75,20 @@ def make_essence(row: dict, snippet: str, full_text: str) -> str:
 @st.cache_data(show_spinner=False)
 def get_stats(db_path: str) -> dict[str, int]:
     with sqlite3.connect(db_path) as conn:
-        return {
+        stats = {
             "metadata": conn.execute("SELECT count(*) FROM decisions").fetchone()[0],
             "documents": conn.execute("SELECT count(*) FROM documents").fetchone()[0],
             "downloaded": conn.execute("SELECT count(*) FROM documents WHERE download_status = 'downloaded'").fetchone()[0],
             "with_text": conn.execute("SELECT count(*) FROM documents WHERE extracted_text IS NOT NULL AND extracted_text <> ''").fetchone()[0],
+            "ai_summaries": 0,
         }
+        try:
+            stats["ai_summaries"] = conn.execute(
+                "SELECT count(*) FROM ai_summaries WHERE error_message IS NULL"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            stats["ai_summaries"] = 0
+        return stats
 
 
 @st.cache_data(show_spinner=False)
@@ -142,6 +150,44 @@ def get_full_text(db_path: str, materialfileid: str) -> str:
     return row[0] if row and row[0] else ""
 
 
+@st.cache_data(show_spinner=False)
+def get_ai_summary(db_path: str, materialfileid: str) -> dict[str, str] | None:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT summary, legal_issue, court_reasoning, outcome, model_name, created_at
+                FROM ai_summaries
+                WHERE materialfileid = ? AND error_message IS NULL
+                """,
+                (materialfileid,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+
+    return dict(row) if row else None
+
+
+def render_ai_summary(ai_summary: dict[str, str] | None, fallback: str) -> str:
+    if not ai_summary:
+        return f"<strong>Būtība:</strong><br>{html.escape(fallback)}"
+
+    parts = []
+    if ai_summary.get("summary"):
+        parts.append(f"<strong>AI kopsavilkums:</strong><br>{html.escape(ai_summary['summary'])}")
+    if ai_summary.get("legal_issue"):
+        parts.append(f"<strong>Juridiskais jautājums:</strong><br>{html.escape(ai_summary['legal_issue'])}")
+    if ai_summary.get("court_reasoning"):
+        parts.append(f"<strong>Tiesas secinājums:</strong><br>{html.escape(ai_summary['court_reasoning'])}")
+    if ai_summary.get("outcome"):
+        parts.append(f"<strong>Rezultāts:</strong><br>{html.escape(ai_summary['outcome'])}")
+
+    if not parts:
+        return f"<strong>Būtība:</strong><br>{html.escape(fallback)}"
+    return "<br><br>".join(parts)
+
+
 st.markdown(
     """
     <style>
@@ -150,6 +196,8 @@ st.markdown(
     .result-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 0.25rem; }
     .result-meta { color: #5f6673; font-size: 0.92rem; margin-bottom: 0.65rem; }
     .result-essence { background: #f6f8fb; border-left: 4px solid #7c9cff; border-radius: 0.45rem; padding: 0.75rem 0.85rem; margin-bottom: 0.75rem; line-height: 1.45; }
+    .ai-badge { display: inline-block; background: #edf7ed; color: #1f7a1f; border: 1px solid #b7e0b7; border-radius: 999px; padding: 0.1rem 0.5rem; font-size: 0.82rem; margin-left: 0.4rem; }
+    .rule-badge { display: inline-block; background: #f6f6f6; color: #666; border: 1px solid #ddd; border-radius: 999px; padding: 0.1rem 0.5rem; font-size: 0.82rem; margin-left: 0.4rem; }
     .result-snippet { font-size: 1rem; line-height: 1.55; color: #242936; }
     </style>
     """,
@@ -157,7 +205,7 @@ st.markdown(
 )
 
 st.title("⚖️ Latvijas tiesu nolēmumu pilots")
-st.caption("GitHub-only MVP: SQLite datubāze, PDF teksta ekstrakcija un pilnteksta meklēšana.")
+st.caption("GitHub-only MVP: SQLite datubāze, PDF teksta ekstrakcija, pilnteksta meklēšana un kešoti AI kopsavilkumi.")
 
 if not DB_PATH.exists():
     st.error(f"Datubāze nav atrasta: `{DB_PATH}`")
@@ -165,11 +213,12 @@ if not DB_PATH.exists():
     st.stop()
 
 stats = get_stats(str(DB_PATH))
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Metadati", stats["metadata"])
 col2.metric("Dokumenti", stats["documents"])
 col3.metric("Lejupielādēti", stats["downloaded"])
 col4.metric("Ar tekstu", stats["with_text"])
+col5.metric("AI kopsavilkumi", stats["ai_summaries"])
 
 with st.sidebar:
     st.header("Meklēšana")
@@ -202,14 +251,17 @@ for index, row in enumerate(rows, start=1):
     raw_snippet = row.get("snippet") or ""
     snippet = clean_snippet(raw_snippet) or "Fragments nav pieejams."
     full_text = get_full_text(str(DB_PATH), row["materialfileid"])
-    essence = make_essence(row, raw_snippet, full_text)
+    fallback_essence = make_essence(row, raw_snippet, full_text)
+    ai_summary = get_ai_summary(str(DB_PATH), row["materialfileid"])
+    summary_html = render_ai_summary(ai_summary, fallback_essence)
+    badge = "<span class='ai-badge'>AI</span>" if ai_summary else "<span class='rule-badge'>noteikumi</span>"
 
     st.markdown(
         f"""
         <div class="result-card">
-            <div class="result-title">#{index} · Lieta {html.escape(case_number)}</div>
+            <div class="result-title">#{index} · Lieta {html.escape(case_number)} {badge}</div>
             <div class="result-meta">{html.escape(court_name)} · {html.escape(str(date))} · {html.escape(process)} · {html.escape(material_type)}</div>
-            <div class="result-essence"><strong>Būtība:</strong><br>{html.escape(essence)}</div>
+            <div class="result-essence">{summary_html}</div>
             <div class="result-snippet"><strong>Fragments:</strong><br>“{snippet}”</div>
         </div>
         """,

@@ -235,6 +235,37 @@ def build_smart_report(question: str, answers: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def markdown_to_html(report: str) -> str:
+    escaped = html.escape(report)
+    escaped = re.sub(r"^# (.*)$", r"<h1>\1</h1>", escaped, flags=re.MULTILINE)
+    escaped = re.sub(r"^## (.*)$", r"<h2>\1</h2>", escaped, flags=re.MULTILINE)
+    escaped = re.sub(r"^### (.*)$", r"<h3>\1</h3>", escaped, flags=re.MULTILINE)
+    escaped = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"^- (.*)$", r"<li>\1</li>", escaped, flags=re.MULTILINE)
+    escaped = escaped.replace("\n\n", "</p><p>").replace("\n", "<br>")
+    return f"""<!doctype html>
+<html lang="lv">
+<head>
+<meta charset="utf-8">
+<title>Gudrais ziņojums</title>
+<style>
+body {{ font-family: Arial, sans-serif; color: #1f2937; max-width: 900px; margin: 40px auto; line-height: 1.55; }}
+h1 {{ color: #111827; border-bottom: 3px solid #2563eb; padding-bottom: 12px; }}
+h2 {{ color: #1d4ed8; margin-top: 28px; }}
+h3 {{ color: #374151; margin-top: 22px; }}
+p {{ margin: 0 0 12px 0; }}
+li {{ margin: 6px 0; }}
+.footer {{ margin-top: 40px; color: #6b7280; font-size: 12px; border-top: 1px solid #e5e7eb; padding-top: 12px; }}
+@media print {{ body {{ margin: 20mm; }} }}
+</style>
+</head>
+<body>
+<p>{escaped}</p>
+<div class="footer">Automātiski ģenerēts sākotnējs pārskats. Pirms juridiskas izmantošanas pārbaudīt oriģinālos nolēmumus.</div>
+</body>
+</html>"""
+
+
 @st.cache_data(show_spinner=False)
 def full_text(db: str, materialfileid: str) -> str:
     with sqlite3.connect(db) as conn:
@@ -346,8 +377,14 @@ with st.expander("💬 Jautājums nolēmumu datubāzei", expanded=True):
             for n, ans in enumerate(answers[:5], 1):
                 st.markdown(f"{n}. {ans.get('answer_text') or 'Avotā pieejams fragments, bet kopsavilkums vēl nav sagatavots.'}")
             report = build_smart_report(question, answers)
+            report_html = markdown_to_html(report)
             with st.expander("🧾 Gudrais ziņojums"):
-                st.download_button("⬇️ Lejupielādēt Markdown ziņojumu", report, file_name="gudrais_zinojums.md", mime="text/markdown")
+                col_md, col_html = st.columns(2)
+                with col_md:
+                    st.download_button("⬇️ Lejupielādēt Markdown", report, file_name="gudrais_zinojums.md", mime="text/markdown")
+                with col_html:
+                    st.download_button("⬇️ Lejupielādēt HTML/PDF", report_html, file_name="gudrais_zinojums.html", mime="text/html")
+                st.caption("HTML failu atver pārlūkā un izvēlies Print / Save as PDF, lai iegūtu noformētu PDF.")
                 st.text_area("Ziņojuma teksts", report, height=520)
             st.markdown("**Avoti:**")
             for ans in answers:

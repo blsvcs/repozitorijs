@@ -101,6 +101,27 @@ def topics(db: str) -> list[str]:
 
 
 @st.cache_data(show_spinner=False)
+def find_case(db: str, case_or_id: str) -> dict | None:
+    value = case_or_id.strip()
+    if not value:
+        return None
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            select d.materialfileid, d.court, d.casenumber, d.processtype, d.materialtype,
+                   d.registrationdate, d.downloadurl, coalesce(t.topic, '') as topic
+            from decisions d
+            left join case_topics t on t.materialfileid=d.materialfileid
+            where d.materialfileid = ? or d.casenumber = ?
+            limit 1
+            """,
+            (value, value),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+@st.cache_data(show_spinner=False)
 def search(db: str, query: str, court: str | None, topic: str | None, limit: int) -> list[dict]:
     q = clean_query(query)
     if not q:
@@ -201,6 +222,20 @@ def summary_html(ai: dict | None, fallback: str) -> tuple[str, bool]:
     return ("<br><br>".join(parts) if parts else f"<strong>Būtība:</strong><br>{html.escape(fallback)}"), bool(parts)
 
 
+def render_similar_list(source_id: str, sims: list[dict]) -> None:
+    if not sims:
+        st.info("Šai lietai vēl nav semantiskā indeksa vai līdzīgās lietas nav atrastas.")
+        return
+    for sim in sims:
+        pct = round(sim["similarity"] * 100, 1)
+        title = sim.get("casenumber") or sim.get("materialfileid")
+        topic_text = f" · {sim.get('topic')}" if sim.get("topic") else ""
+        st.markdown(f"**{title}** — līdzība **{pct}%**  \n{sim.get('court') or '-'} · {sim.get('registrationdate') or '-'} · {sim.get('processtype') or '-'} · {sim.get('materialtype') or '-'}{topic_text}")
+        if sim.get("downloadurl"):
+            st.link_button("📄 Atvērt līdzīgās lietas PDF", sim["downloadurl"], key=f"pdf-{source_id}-{sim['materialfileid']}")
+        st.divider()
+
+
 st.markdown("""
 <style>
 mark{background:#fff3a3;padding:.05rem .18rem;border-radius:.2rem}.card{border:1px solid #e6e8ef;border-radius:.75rem;padding:1rem;margin-bottom:.85rem;background:#fff}.meta{color:#5f6673;font-size:.92rem;margin:.25rem 0 .65rem}.box{background:#f6f8fb;border-left:4px solid #7c9cff;border-radius:.45rem;padding:.75rem;margin-bottom:.75rem;line-height:1.45}.ai{background:#edf7ed;color:#1f7a1f;border:1px solid #b7e0b7;border-radius:999px;padding:.1rem .5rem;font-size:.82rem}.rules{background:#f6f6f6;color:#666;border:1px solid #ddd;border-radius:999px;padding:.1rem .5rem;font-size:.82rem}.topic{background:#eef4ff;color:#2457a6;border:1px solid #c9d8ff;border-radius:999px;padding:.1rem .5rem;font-size:.82rem;margin-left:.35rem}
@@ -219,6 +254,29 @@ c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 c1.metric("Metadati", s["metadata"]); c2.metric("Dokumenti", s["documents"]); c3.metric("Lejupielādēti", s["downloaded"])
 c4.metric("Ar tekstu", s["with_text"]); c5.metric("AI", s["ai"]); c6.metric("Semantika", s["semantic"]); c7.metric("Tēmas", s["topics"])
 
+st.subheader("🔎 Līdzīgas lietas pēc būtības")
+sim_col1, sim_col2 = st.columns([3, 1])
+with sim_col1:
+    similar_lookup = st.text_input("Ievadi lietas numuru vai MaterialFileId", placeholder="piemēram: C32339412")
+with sim_col2:
+    similar_limit = st.slider("Līdzīgo skaits", 3, 15, 5, 1)
+
+if similar_lookup:
+    source_case = find_case(str(DB_PATH), similar_lookup)
+    if not source_case:
+        st.warning("Lieta nav atrasta pēc ievadītā lietas numura vai MaterialFileId.")
+    else:
+        st.markdown(
+            f"**Avota lieta:** {source_case.get('casenumber') or source_case['materialfileid']}  \n"
+            f"{source_case.get('court') or '-'} · {source_case.get('registrationdate') or '-'} · "
+            f"{source_case.get('processtype') or '-'} · {source_case.get('materialtype') or '-'} · {source_case.get('topic') or 'Bez tēmas'}"
+        )
+        if source_case.get("downloadurl"):
+            st.link_button("📄 Atvērt avota PDF", source_case["downloadurl"])
+        render_similar_list(source_case["materialfileid"], similar_cases(str(DB_PATH), source_case["materialfileid"], similar_limit))
+
+st.divider()
+
 with st.sidebar:
     st.header("Meklēšana")
     query = st.text_input("Meklējamā frāze", placeholder="piemēram: kredīta parāds")
@@ -229,7 +287,7 @@ with st.sidebar:
     selected_topic = None if topic_choice == "Visas" else topic_choice
 
 if not query:
-    st.info("Ieraksti meklējamo frāzi kreisajā pusē, lai sāktu.")
+    st.info("Ieraksti meklējamo frāzi kreisajā pusē, lai sāktu pilnteksta meklēšanu.")
     st.stop()
 
 rows = search(str(DB_PATH), query, selected_court, selected_topic, limit)
@@ -265,14 +323,4 @@ for i, row in enumerate(rows, 1):
             st.text_area("Pilns nolēmuma teksts", ft[:100000], height=500) if ft else st.warning("Pilns teksts nav pieejams.")
 
     with st.expander("🔎 Līdzīgas lietas"):
-        sims = similar_cases(str(DB_PATH), row["materialfileid"], 5)
-        if not sims:
-            st.info("Šai lietai vēl nav semantiskā indeksa vai līdzīgās lietas nav atrastas.")
-        for sim in sims:
-            pct = round(sim["similarity"] * 100, 1)
-            title = sim.get("casenumber") or sim.get("materialfileid")
-            topic_text = f" · {sim.get('topic')}" if sim.get("topic") else ""
-            st.markdown(f"**{title}** — līdzība **{pct}%**  \n{sim.get('court') or '-'} · {sim.get('registrationdate') or '-'} · {sim.get('processtype') or '-'} · {sim.get('materialtype') or '-'}{topic_text}")
-            if sim.get("downloadurl"):
-                st.link_button("📄 Atvērt līdzīgās lietas PDF", sim["downloadurl"], key=f"pdf-{row['materialfileid']}-{sim['materialfileid']}")
-            st.divider()
+        render_similar_list(row["materialfileid"], similar_cases(str(DB_PATH), row["materialfileid"], 5))

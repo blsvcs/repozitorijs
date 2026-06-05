@@ -66,6 +66,7 @@ def stats(db: str) -> dict[str, int]:
             "with_text": conn.execute("select count(*) from documents where extracted_text is not null and extracted_text<>''").fetchone()[0],
             "ai": 0,
             "semantic": 0,
+            "topics": 0,
         }
         try:
             out["ai"] = conn.execute("select count(*) from ai_summaries where error_message is null").fetchone()[0]
@@ -73,6 +74,10 @@ def stats(db: str) -> dict[str, int]:
             pass
         try:
             out["semantic"] = conn.execute("select count(*) from semantic_embeddings").fetchone()[0]
+        except sqlite3.OperationalError:
+            pass
+        try:
+            out["topics"] = conn.execute("select count(*) from case_topics").fetchone()[0]
         except sqlite3.OperationalError:
             pass
         return out
@@ -86,23 +91,40 @@ def courts(db: str) -> list[str]:
 
 
 @st.cache_data(show_spinner=False)
-def search(db: str, query: str, court: str | None, limit: int) -> list[dict]:
+def topics(db: str) -> list[str]:
+    try:
+        with sqlite3.connect(db) as conn:
+            rows = conn.execute("select topic, count(*) as n from case_topics group by topic order by n desc, topic").fetchall()
+        return [r[0] for r in rows]
+    except sqlite3.OperationalError:
+        return []
+
+
+@st.cache_data(show_spinner=False)
+def search(db: str, query: str, court: str | None, topic: str | None, limit: int) -> list[dict]:
     q = clean_query(query)
     if not q:
         return []
-    params: list[object] = [q]
+    joins = ["join decisions d on d.materialfileid = documents_fts.materialfileid"]
     where = ["documents_fts match ?"]
+    params: list[object] = [q]
     if court:
         where.append("d.court = ?")
         params.append(court)
+    if topic:
+        joins.append("join case_topics t on t.materialfileid = d.materialfileid")
+        where.append("t.topic = ?")
+        params.append(topic)
     params.append(limit)
     sql = f"""
     select d.materialfileid, d.court, d.casenumber, d.processtype, d.materialtype,
            d.registrationdate, d.downloadurl,
+           {"t.topic as topic," if topic else "coalesce(t2.topic, '') as topic,"}
            snippet(documents_fts, 3, '[', ']', ' ... ', 42) as snippet,
            bm25(documents_fts) as rank
     from documents_fts
-    join decisions d on d.materialfileid = documents_fts.materialfileid
+    {' '.join(joins)}
+    {"left join case_topics t2 on t2.materialfileid = d.materialfileid" if not topic else ""}
     where {' and '.join(where)}
     order by rank
     limit ?
@@ -145,9 +167,10 @@ def similar_cases(db: str, materialfileid: str, limit: int = 5) -> list[dict]:
             rows = conn.execute(
                 """
                 select e.materialfileid, e.embedding, d.court, d.casenumber, d.processtype,
-                       d.materialtype, d.registrationdate, d.downloadurl
+                       d.materialtype, d.registrationdate, d.downloadurl, coalesce(t.topic, '') as topic
                 from semantic_embeddings e
                 join decisions d on d.materialfileid=e.materialfileid
+                left join case_topics t on t.materialfileid=d.materialfileid
                 where e.model_name=? and e.materialfileid<>?
                 """,
                 (src["model_name"], materialfileid),
@@ -180,37 +203,39 @@ def summary_html(ai: dict | None, fallback: str) -> tuple[str, bool]:
 
 st.markdown("""
 <style>
-mark{background:#fff3a3;padding:.05rem .18rem;border-radius:.2rem}.card{border:1px solid #e6e8ef;border-radius:.75rem;padding:1rem;margin-bottom:.85rem;background:#fff}.meta{color:#5f6673;font-size:.92rem;margin:.25rem 0 .65rem}.box{background:#f6f8fb;border-left:4px solid #7c9cff;border-radius:.45rem;padding:.75rem;margin-bottom:.75rem;line-height:1.45}.ai{background:#edf7ed;color:#1f7a1f;border:1px solid #b7e0b7;border-radius:999px;padding:.1rem .5rem;font-size:.82rem}.rules{background:#f6f6f6;color:#666;border:1px solid #ddd;border-radius:999px;padding:.1rem .5rem;font-size:.82rem}
+mark{background:#fff3a3;padding:.05rem .18rem;border-radius:.2rem}.card{border:1px solid #e6e8ef;border-radius:.75rem;padding:1rem;margin-bottom:.85rem;background:#fff}.meta{color:#5f6673;font-size:.92rem;margin:.25rem 0 .65rem}.box{background:#f6f8fb;border-left:4px solid #7c9cff;border-radius:.45rem;padding:.75rem;margin-bottom:.75rem;line-height:1.45}.ai{background:#edf7ed;color:#1f7a1f;border:1px solid #b7e0b7;border-radius:999px;padding:.1rem .5rem;font-size:.82rem}.rules{background:#f6f6f6;color:#666;border:1px solid #ddd;border-radius:999px;padding:.1rem .5rem;font-size:.82rem}.topic{background:#eef4ff;color:#2457a6;border:1px solid #c9d8ff;border-radius:999px;padding:.1rem .5rem;font-size:.82rem;margin-left:.35rem}
 </style>
 """, unsafe_allow_html=True)
 
 st.title("⚖️ Latvijas tiesu nolēmumu pilots")
-st.caption("SQLite, pilnteksta meklēšana, AI kopsavilkumi, PDF un līdzīgo lietu meklēšana.")
+st.caption("SQLite, pilnteksta meklēšana, AI kopsavilkumi, PDF, tēmas un līdzīgo lietu meklēšana.")
 
 if not DB_PATH.exists():
     st.error(f"Datubāze nav atrasta: `{DB_PATH}`")
     st.stop()
 
 s = stats(str(DB_PATH))
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 c1.metric("Metadati", s["metadata"]); c2.metric("Dokumenti", s["documents"]); c3.metric("Lejupielādēti", s["downloaded"])
-c4.metric("Ar tekstu", s["with_text"]); c5.metric("AI", s["ai"]); c6.metric("Semantika", s["semantic"])
+c4.metric("Ar tekstu", s["with_text"]); c5.metric("AI", s["ai"]); c6.metric("Semantika", s["semantic"]); c7.metric("Tēmas", s["topics"])
 
 with st.sidebar:
     st.header("Meklēšana")
     query = st.text_input("Meklējamā frāze", placeholder="piemēram: kredīta parāds")
     limit = st.slider("Rezultātu skaits", 5, 50, 10, 5)
     court = st.selectbox("Tiesa", ["Visas"] + courts(str(DB_PATH)))
+    topic_choice = st.selectbox("Tēma", ["Visas"] + topics(str(DB_PATH)))
     selected_court = None if court == "Visas" else court
+    selected_topic = None if topic_choice == "Visas" else topic_choice
 
 if not query:
     st.info("Ieraksti meklējamo frāzi kreisajā pusē, lai sāktu.")
     st.stop()
 
-rows = search(str(DB_PATH), query, selected_court, limit)
+rows = search(str(DB_PATH), query, selected_court, selected_topic, limit)
 st.subheader(f"Atrasti rezultāti: {len(rows)}")
 if not rows:
-    st.warning("Nav rezultātu. Pamēģini īsāku frāzi.")
+    st.warning("Nav rezultātu. Pamēģini īsāku frāzi vai noņem tēmas/tiesas filtru.")
     st.stop()
 
 for i, row in enumerate(rows, 1):
@@ -218,11 +243,12 @@ for i, row in enumerate(rows, 1):
     fallback = rule_summary(row, row.get("snippet") or "", ft)
     block, has_ai = summary_html(ai_summary(str(DB_PATH), row["materialfileid"]), fallback)
     badge = "<span class='ai'>AI</span>" if has_ai else "<span class='rules'>noteikumi</span>"
+    topic_badge = f"<span class='topic'>{html.escape(row.get('topic') or 'Bez tēmas')}</span>" if row.get("topic") else ""
     snippet = clean_snippet(row.get("snippet")) or "Fragments nav pieejams."
 
     st.markdown(f"""
     <div class='card'>
-      <strong>#{i} · Lieta {html.escape(row.get('casenumber') or 'Bez lietas numura')}</strong> {badge}
+      <strong>#{i} · Lieta {html.escape(row.get('casenumber') or 'Bez lietas numura')}</strong> {badge} {topic_badge}
       <div class='meta'>{html.escape(row.get('court') or '-')} · {html.escape(str(row.get('registrationdate') or '-'))} · {html.escape(row.get('processtype') or '-')} · {html.escape(row.get('materialtype') or '-')}</div>
       <div class='box'>{block}</div>
       <strong>Fragments:</strong><br>“{snippet}”
@@ -245,7 +271,8 @@ for i, row in enumerate(rows, 1):
         for sim in sims:
             pct = round(sim["similarity"] * 100, 1)
             title = sim.get("casenumber") or sim.get("materialfileid")
-            st.markdown(f"**{title}** — līdzība **{pct}%**  \n{sim.get('court') or '-'} · {sim.get('registrationdate') or '-'} · {sim.get('processtype') or '-'} · {sim.get('materialtype') or '-'}")
+            topic_text = f" · {sim.get('topic')}" if sim.get("topic") else ""
+            st.markdown(f"**{title}** — līdzība **{pct}%**  \n{sim.get('court') or '-'} · {sim.get('registrationdate') or '-'} · {sim.get('processtype') or '-'} · {sim.get('materialtype') or '-'}{topic_text}")
             if sim.get("downloadurl"):
                 st.link_button("📄 Atvērt līdzīgās lietas PDF", sim["downloadurl"], key=f"pdf-{row['materialfileid']}-{sim['materialfileid']}")
             st.divider()

@@ -29,6 +29,10 @@ def clean_snippet(value: str | None) -> str:
     return text.replace("[", "<mark>").replace("]", "</mark>")
 
 
+def pct(part: int, total: int) -> float:
+    return round((part / total) * 100, 1) if total else 0.0
+
+
 def rule_summary(row: dict, snippet: str, full_text: str) -> str:
     text = clean_text((full_text or snippet)[:3000]).lower()
     material_type = row.get("materialtype") or ""
@@ -244,26 +248,9 @@ def markdown_to_html(report: str) -> str:
     escaped = re.sub(r"^- (.*)$", r"<li>\1</li>", escaped, flags=re.MULTILINE)
     escaped = escaped.replace("\n\n", "</p><p>").replace("\n", "<br>")
     return f"""<!doctype html>
-<html lang="lv">
-<head>
-<meta charset="utf-8">
-<title>Gudrais ziņojums</title>
-<style>
-body {{ font-family: Arial, sans-serif; color: #1f2937; max-width: 900px; margin: 40px auto; line-height: 1.55; }}
-h1 {{ color: #111827; border-bottom: 3px solid #2563eb; padding-bottom: 12px; }}
-h2 {{ color: #1d4ed8; margin-top: 28px; }}
-h3 {{ color: #374151; margin-top: 22px; }}
-p {{ margin: 0 0 12px 0; }}
-li {{ margin: 6px 0; }}
-.footer {{ margin-top: 40px; color: #6b7280; font-size: 12px; border-top: 1px solid #e5e7eb; padding-top: 12px; }}
-@media print {{ body {{ margin: 20mm; }} }}
-</style>
-</head>
-<body>
-<p>{escaped}</p>
-<div class="footer">Automātiski ģenerēts sākotnējs pārskats. Pirms juridiskas izmantošanas pārbaudīt oriģinālos nolēmumus.</div>
-</body>
-</html>"""
+<html lang="lv"><head><meta charset="utf-8"><title>Gudrais ziņojums</title>
+<style>body{{font-family:Arial,sans-serif;color:#1f2937;max-width:900px;margin:40px auto;line-height:1.55}}h1{{border-bottom:3px solid #2563eb;padding-bottom:12px}}h2{{color:#1d4ed8;margin-top:28px}}h3{{color:#374151;margin-top:22px}}li{{margin:6px 0}}.footer{{margin-top:40px;color:#6b7280;font-size:12px;border-top:1px solid #e5e7eb;padding-top:12px}}@media print{{body{{margin:20mm}}}}</style>
+</head><body><p>{escaped}</p><div class="footer">Automātiski ģenerēts sākotnējs pārskats. Pirms juridiskas izmantošanas pārbaudīt oriģinālos nolēmumus.</div></body></html>"""
 
 
 @st.cache_data(show_spinner=False)
@@ -334,10 +321,10 @@ def render_similar_list(source_id: str, sims: list[dict]) -> None:
         st.info("Šai lietai vēl nav semantiskā indeksa vai līdzīgās lietas nav atrastas.")
         return
     for sim in sims:
-        pct = round(sim["similarity"] * 100, 1)
+        pct_value = round(sim["similarity"] * 100, 1)
         title = sim.get("casenumber") or sim.get("materialfileid")
         topic_text = f" · {sim.get('topic')}" if sim.get("topic") else ""
-        st.markdown(f"**{title}** — līdzība **{pct}%**  \n{sim.get('court') or '-'} · {sim.get('registrationdate') or '-'} · {sim.get('processtype') or '-'} · {sim.get('materialtype') or '-'}{topic_text}")
+        st.markdown(f"**{title}** — līdzība **{pct_value}%**  \n{sim.get('court') or '-'} · {sim.get('registrationdate') or '-'} · {sim.get('processtype') or '-'} · {sim.get('materialtype') or '-'}{topic_text}")
         if sim.get("downloadurl"):
             st.link_button("📄 Atvērt līdzīgās lietas PDF", sim["downloadurl"], key=f"pdf-{source_id}-{sim['materialfileid']}")
         st.divider()
@@ -357,6 +344,21 @@ if not DB_PATH.exists():
     st.stop()
 
 s = stats(str(DB_PATH))
+with st.expander("📌 Vadības panelis", expanded=True):
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Datu kopas apjoms", s["metadata"])
+    k2.metric("Teksta pārklājums", f"{pct(s['with_text'], s['documents'])}%")
+    k3.metric("AI pārklājums", f"{pct(s['ai'], s['with_text'])}%")
+    k4.metric("Semantikas pārklājums", f"{pct(s['semantic'], s['with_text'])}%")
+    p1, p2, p3 = st.columns(3)
+    p1.progress(pct(s["with_text"], s["documents"]) / 100, text=f"Teksts: {s['with_text']} no {s['documents']}")
+    p2.progress(pct(s["ai"], s["with_text"]) / 100, text=f"AI: {s['ai']} no {s['with_text']}")
+    p3.progress(pct(s["semantic"], s["with_text"]) / 100, text=f"Semantika: {s['semantic']} no {s['with_text']}")
+    if s["with_text"] > 0 and s["semantic"] >= min(1000, s["with_text"]):
+        st.success("Pilots ir demonstrējams: ir pilnteksta meklēšana, semantika, tēmas, līdzīgās lietas un ziņojumi.")
+    else:
+        st.info("Pilots darbojas, bet datu pārklājumu vēl var palielināt ar papildu teksta ekstrakciju, AI kopsavilkumiem un semantisko indeksu.")
+
 c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
 c1.metric("Metadati", s["metadata"]); c2.metric("Dokumenti", s["documents"]); c3.metric("Lejupielādēti", s["downloaded"])
 c4.metric("Ar tekstu", s["with_text"]); c5.metric("AI", s["ai"]); c6.metric("Semantika", s["semantic"]); c7.metric("Tēmas", s["topics"])

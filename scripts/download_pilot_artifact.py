@@ -14,6 +14,8 @@ import requests
 DEFAULT_REPO = "blsvcs/repozitorijs"
 DEFAULT_WORKFLOW = "build_pilot_dataset.yml"
 DEFAULT_ARTIFACT = "pilot-dataset"
+DEFAULT_RELEASE_TAG = "pilot-dataset-latest"
+DEFAULT_RELEASE_ASSET = "pilot-dataset.zip"
 DEFAULT_OUTPUT = Path("pilot/pilot.sqlite")
 
 
@@ -53,6 +55,14 @@ def find_artifact(repo: str, run_id: int, artifact_name: str, token: str | None)
         if artifact.get("name") == artifact_name and not artifact.get("expired"):
             return artifact
     raise RuntimeError(f"No active artifact named {artifact_name!r} found for run {run_id}.")
+
+
+def find_release_asset(repo: str, tag: str, asset_name: str, token: str | None) -> dict:
+    release = api_get(f"https://api.github.com/repos/{repo}/releases/tags/{tag}", token)
+    for asset in release.get("assets", []):
+        if asset.get("name") == asset_name:
+            return asset
+    raise RuntimeError(f"No release asset named {asset_name!r} found for tag {tag!r}.")
 
 
 def download_zip(url: str, destination: Path, token: str | None) -> None:
@@ -95,13 +105,21 @@ def validate_database(path: Path) -> dict[str, int]:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download the latest pilot.sqlite GitHub Actions artifact.")
+    parser = argparse.ArgumentParser(description="Download the latest pilot.sqlite database.")
     parser.add_argument("--repo", default=os.getenv("PILOT_REPO", DEFAULT_REPO))
     parser.add_argument("--workflow", default=os.getenv("PILOT_WORKFLOW", DEFAULT_WORKFLOW))
     parser.add_argument("--artifact", default=os.getenv("PILOT_ARTIFACT", DEFAULT_ARTIFACT))
+    parser.add_argument("--release-tag", default=os.getenv("PILOT_RELEASE_TAG", DEFAULT_RELEASE_TAG))
+    parser.add_argument("--release-asset", default=os.getenv("PILOT_RELEASE_ASSET", DEFAULT_RELEASE_ASSET))
     parser.add_argument("--branch", default=os.getenv("PILOT_BRANCH", "main"))
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--run-id", type=int, default=None, help="Use a specific workflow run instead of the latest success.")
+    parser.add_argument(
+        "--source",
+        choices=("auto", "release", "actions"),
+        default=os.getenv("PILOT_DOWNLOAD_SOURCE", "auto"),
+        help="Prefer the stable release asset, or fall back to Actions artifacts.",
+    )
     parser.add_argument("--force", action="store_true", help="Replace the local database if it already exists.")
     return parser.parse_args(argv)
 
@@ -112,27 +130,43 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.output.exists() and not args.force:
         print(f"Local database already exists: {args.output}")
-        print("Use --force to replace it with the latest artifact.")
+        print("Use --force to replace it with the latest published database.")
         return 0
 
     try:
-        if args.run_id:
-            run_id = args.run_id
-            run_url = f"https://github.com/{args.repo}/actions/runs/{run_id}"
-        else:
-            run = latest_successful_run(args.repo, args.workflow, args.branch, token)
-            run_id = int(run["id"])
-            run_url = run.get("html_url", f"https://github.com/{args.repo}/actions/runs/{run_id}")
+        download_url = ""
+        source_url = ""
+        if args.source in ("auto", "release") and not args.run_id:
+            try:
+                asset = find_release_asset(args.repo, args.release_tag, args.release_asset, token)
+                download_url = asset["browser_download_url"]
+                source_url = f"https://github.com/{args.repo}/releases/tag/{args.release_tag}"
+            except requests.RequestException:
+                if args.source == "release":
+                    raise
+            except RuntimeError as exc:
+                if args.source == "release":
+                    raise
+                print(f"Release asset unavailable, falling back to Actions artifact: {exc}", file=sys.stderr)
 
-        artifact = find_artifact(args.repo, run_id, args.artifact, token)
+        if not download_url:
+            if args.run_id:
+                run_id = args.run_id
+                source_url = f"https://github.com/{args.repo}/actions/runs/{run_id}"
+            else:
+                run = latest_successful_run(args.repo, args.workflow, args.branch, token)
+                run_id = int(run["id"])
+                source_url = run.get("html_url", f"https://github.com/{args.repo}/actions/runs/{run_id}")
+            artifact = find_artifact(args.repo, run_id, args.artifact, token)
+            download_url = artifact["archive_download_url"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
             zip_path = Path(tmpdir) / "pilot-dataset.zip"
-            download_zip(artifact["archive_download_url"], zip_path, token)
+            download_zip(download_url, zip_path, token)
             extract_sqlite(zip_path, args.output)
 
         stats = validate_database(args.output)
-        print(f"Downloaded {args.artifact} from {run_url}")
+        print(f"Downloaded pilot database from {source_url}")
         print(f"Saved database: {args.output}")
         print(
             "Stats: "
@@ -142,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     except requests.RequestException as exc:
-        print(f"GitHub artifact download failed: {exc}", file=sys.stderr)
+        print(f"GitHub database download failed: {exc}", file=sys.stderr)
         print("Check network access. If GitHub asks for authentication, set GITHUB_TOKEN or GH_TOKEN.", file=sys.stderr)
         return 1
     except (OSError, RuntimeError, sqlite3.Error, zipfile.BadZipFile) as exc:

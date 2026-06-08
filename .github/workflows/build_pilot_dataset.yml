@@ -79,6 +79,20 @@ jobs:
 
       - name: Publish pilot SQLite to repository
         run: |
+          MAX_GIT_FILE_BYTES=95000000
+          PILOT_SIZE=$(wc -c < pilot/pilot.sqlite)
+          if [ "$PILOT_SIZE" -gt "$MAX_GIT_FILE_BYTES" ]; then
+            echo "pilot.sqlite is ${PILOT_SIZE} bytes, which is too large for regular GitHub git storage."
+            echo "Skipping repository commit; use the pilot-dataset workflow artifact instead."
+            {
+              echo "### Pilot SQLite repository publish skipped"
+              echo
+              echo "pilot/pilot.sqlite is ${PILOT_SIZE} bytes, which is above the ${MAX_GIT_FILE_BYTES} byte safety limit."
+              echo "The SQLite database was uploaded successfully as the pilot-dataset workflow artifact."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add pilot/pilot.sqlite

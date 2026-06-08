@@ -68,6 +68,14 @@ python scripts/download_pilot_artifact.py --force
 
 Skripts paņem jaunāko veiksmīgo `Build pilot dataset` palaišanu un izpako `pilot.sqlite` uz `pilot/pilot.sqlite`.
 
+### Demo pārbaude
+
+```bash
+python scripts/smoke_demo.py
+```
+
+Šis pārbauda pilotdatubāzi, trīs galvenos demo vaicājumus un Streamlit rezultātu/pārskata plūsmu.
+
 ## API virziens
 
 PostgreSQL/pgvector API var palaist ar Docker:

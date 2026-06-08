@@ -77,28 +77,37 @@ jobs:
             pilot/pilot.sqlite
           retention-days: 30
 
-      - name: Publish pilot SQLite to repository
+      - name: Publish latest pilot dataset release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          MAX_GIT_FILE_BYTES=95000000
-          PILOT_SIZE=$(wc -c < pilot/pilot.sqlite)
-          if [ "$PILOT_SIZE" -gt "$MAX_GIT_FILE_BYTES" ]; then
-            echo "pilot.sqlite is ${PILOT_SIZE} bytes, which is too large for regular GitHub git storage."
-            echo "Skipping repository commit; use the pilot-dataset workflow artifact instead."
-            {
-              echo "### Pilot SQLite repository publish skipped"
-              echo
-              echo "pilot/pilot.sqlite is ${PILOT_SIZE} bytes, which is above the ${MAX_GIT_FILE_BYTES} byte safety limit."
-              echo "The SQLite database was uploaded successfully as the pilot-dataset workflow artifact."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+          RELEASE_TAG="pilot-dataset-latest"
+          RELEASE_TITLE="Latest pilot dataset"
+          ASSET="pilot-dataset.zip"
+
+          rm -f "$ASSET"
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          db = Path("pilot/pilot.sqlite")
+          with zipfile.ZipFile("pilot-dataset.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
+              archive.write(db, arcname="pilot.sqlite")
+          PY
+
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes "Automātiski atjaunota pilotdatubāze Streamlit lietotnei."
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add pilot/pilot.sqlite
-          if git diff --cached --quiet; then
-            echo "No pilot.sqlite changes to commit."
-          else
-            git commit -m "Update pilot SQLite dataset"
-            git push
-          fi
+          gh release upload "$RELEASE_TAG" "$ASSET" --clobber
+
+          {
+            echo "### Pilot SQLite release updated"
+            echo
+            echo "- Release: $RELEASE_TAG"
+            echo "- Asset: $ASSET"
+            echo "- SQLite size: $(wc -c < pilot/pilot.sqlite) bytes"
+            echo "- ZIP size: $(wc -c < "$ASSET") bytes"
+          } >> "$GITHUB_STEP_SUMMARY"

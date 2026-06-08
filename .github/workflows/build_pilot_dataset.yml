@@ -13,6 +13,14 @@ on:
         default: '500'
   schedule:
     - cron: '20 2 * * *'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/build_pilot_dataset.yml'
+      - 'scripts/build_pilot_sqlite.py'
+      - 'scripts/classify_topics.py'
+      - 'sync_anon_nolemumi.py'
 
 permissions:
   contents: write

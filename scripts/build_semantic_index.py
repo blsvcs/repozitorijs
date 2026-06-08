@@ -12,14 +12,21 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 DB_PATH = Path("pilot/pilot.sqlite")
 DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+def configure_output() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS semantic_embeddings (
@@ -102,11 +109,15 @@ def save_embedding(conn: sqlite3.Connection, materialfileid: str, model_name: st
 
 
 def main() -> int:
+    configure_output()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", type=Path, default=DB_PATH)
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--dry-run", action="store_true", help="Show pending rows without loading the embedding model.")
+    parser.add_argument("--status", action="store_true", help="Print current semantic index status and exit.")
     args = parser.parse_args()
 
     if not args.db.exists():
@@ -115,10 +126,42 @@ def main() -> int:
     with sqlite3.connect(args.db) as conn:
         conn.row_factory = sqlite3.Row
         init_db(conn)
+        total_ready = conn.execute("SELECT count(*) FROM semantic_embeddings WHERE model_name = ?", (args.model,)).fetchone()[0]
+        if args.status:
+            pending_total = conn.execute(
+                """
+                SELECT count(*)
+                FROM documents doc
+                LEFT JOIN semantic_embeddings emb
+                  ON emb.materialfileid = doc.materialfileid
+                 AND emb.model_name = ?
+                WHERE doc.download_status = 'downloaded'
+                  AND doc.extracted_text IS NOT NULL
+                  AND doc.extracted_text <> ''
+                  AND emb.materialfileid IS NULL
+                """,
+                (args.model,),
+            ).fetchone()[0]
+            print(f"Semantic embeddings ready: {total_ready}")
+            print(f"Pending semantic embeddings: {pending_total}")
+            print(f"Model: {args.model}")
+            return 0
+
         rows = get_pending(conn, args.model, args.limit)
         print(f"Pending semantic embeddings: {len(rows)}")
+        if args.dry_run:
+            if rows:
+                preview = build_embedding_text(rows[0])
+                print("\nEmbedding text preview:")
+                print(preview[:3000])
+            return 0
         if not rows:
             return 0
+
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ModuleNotFoundError as exc:
+            raise SystemExit("sentence-transformers package is not installed. Run: pip install -r requirements.txt") from exc
 
         model = SentenceTransformer(args.model)
 

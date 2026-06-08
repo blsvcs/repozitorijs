@@ -19,15 +19,22 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-
-from openai import OpenAI
+from typing import Any
 
 DB_PATH = Path("pilot/pilot.sqlite")
 DEFAULT_ENDPOINT = "https://models.github.ai/inference"
 DEFAULT_MODEL = "deepseek/DeepSeek-V3-0324"
+
+
+def configure_output() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_summaries (
@@ -117,7 +124,7 @@ def parse_json_response(content: str) -> dict[str, str]:
     }
 
 
-def generate_summary(client: OpenAI, model: str, row: sqlite3.Row) -> dict[str, str]:
+def generate_summary(client: Any, model: str, row: sqlite3.Row) -> dict[str, str]:
     response = client.chat.completions.create(
         model=model,
         temperature=0.1,
@@ -162,19 +169,15 @@ def save_summary(conn: sqlite3.Connection, materialfileid: str, data: dict[str, 
 
 
 def main() -> int:
+    configure_output()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", type=Path, default=DB_PATH)
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--sleep", type=float, default=1.0)
     parser.add_argument("--model", default=os.environ.get("GITHUB_MODELS_MODEL", DEFAULT_MODEL))
+    parser.add_argument("--dry-run", action="store_true", help="Show pending rows and a prompt preview without calling an AI model.")
     args = parser.parse_args()
-
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        raise SystemExit("GITHUB_TOKEN is not available. Run this in GitHub Actions or Codespaces.")
-
-    endpoint = os.environ.get("GITHUB_MODELS_ENDPOINT", DEFAULT_ENDPOINT)
-    client = OpenAI(base_url=endpoint, api_key=token)
 
     if not args.db.exists():
         raise SystemExit(f"Database not found: {args.db}")
@@ -184,6 +187,23 @@ def main() -> int:
         init_db(conn)
         rows = get_pending(conn, args.limit)
         print(f"Pending summaries: {len(rows)}")
+        if args.dry_run:
+            if rows:
+                print("\nPrompt preview:")
+                print(build_prompt(rows[0])[:3000])
+            return 0
+
+        token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            raise SystemExit("GITHUB_TOKEN is not available. Run this in GitHub Actions or Codespaces.")
+
+        try:
+            from openai import OpenAI
+        except ModuleNotFoundError as exc:
+            raise SystemExit("openai package is not installed. Run: pip install -r requirements.txt") from exc
+
+        endpoint = os.environ.get("GITHUB_MODELS_ENDPOINT", DEFAULT_ENDPOINT)
+        client = OpenAI(base_url=endpoint, api_key=token)
 
         for idx, row in enumerate(rows, start=1):
             materialfileid = row["materialfileid"]

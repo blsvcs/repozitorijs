@@ -41,8 +41,10 @@ python search_pilot.py "kredīta parāds" --limit 5
 
 ```bash
 pip install -r requirements.txt
-streamlit run streamlit_app.py
+python run_pilot.py
 ```
+
+`run_pilot.py` pirms palaišanas pārbauda, vai lokāli ir `pilot/pilot.sqlite`; ja nav, tas paņem jaunāko GitHub Actions artefaktu un tad palaiž Streamlit.
 
 ### Tēmu klasifikācija
 
@@ -55,6 +57,16 @@ python scripts/classify_topics.py --limit 1500
 ```bash
 python sync_anon_nolemumi.py
 ```
+
+### Jaunākās pilotdatubāzes lejupielāde
+
+Ja `pilot/pilot.sqlite` nav lokāli vai gribi paņemt jaunāko GitHub Actions artefaktu:
+
+```bash
+python scripts/download_pilot_artifact.py --force
+```
+
+Skripts paņem jaunāko veiksmīgo `Build pilot dataset` palaišanu un izpako `pilot.sqlite` uz `pilot/pilot.sqlite`.
 
 ## API virziens
 

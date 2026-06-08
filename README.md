@@ -7,6 +7,7 @@ Projekta pašreizējais fokuss ir praktisks pilots: lietotājs var meklēt nolē
 ## Kas ir iekšā
 
 - `streamlit_app.py` - galvenā pilota lietotne pārlūkā.
+- `streamlit_entrypoint.py` - hostinga ieejas fails, kas pirms starta paņem jaunāko pilotdatubāzi.
 - `pilot/pilot.sqlite` - lokāla SQLite pilotdatubāze.
 - `search_pilot.py` - ātra komandrindas meklēšana pilotdatubāzē.
 - `sync_anon_nolemumi.py` - DAGR CSV metadatu lejupielāde un arhivēšana.
@@ -44,7 +45,15 @@ pip install -r requirements.txt
 python run_pilot.py
 ```
 
-`run_pilot.py` pirms palaišanas pārbauda, vai lokāli ir `pilot/pilot.sqlite`; ja nav, tas paņem jaunāko GitHub Actions artefaktu un tad palaiž Streamlit.
+`run_pilot.py` pirms palaišanas pārbauda, vai lokāli ir `pilot/pilot.sqlite`; ja nav, tas paņem jaunāko publicēto pilotdatubāzi un tad palaiž Streamlit.
+
+Hostingam izmanto:
+
+```bash
+streamlit run streamlit_entrypoint.py
+```
+
+`streamlit_entrypoint.py` startā paņem jaunāko publicēto pilotdatubāzi, ja `pilot/pilot.sqlite` vēl nav lokāli.
 
 ### Tēmu klasifikācija
 
@@ -60,13 +69,13 @@ python sync_anon_nolemumi.py
 
 ### Jaunākās pilotdatubāzes lejupielāde
 
-Ja `pilot/pilot.sqlite` nav lokāli vai gribi paņemt jaunāko GitHub Actions artefaktu:
+Ja `pilot/pilot.sqlite` nav lokāli vai gribi paņemt jaunāko publicēto pilotdatubāzi:
 
 ```bash
 python scripts/download_pilot_artifact.py --force
 ```
 
-Skripts paņem jaunāko veiksmīgo `Build pilot dataset` palaišanu un izpako `pilot.sqlite` uz `pilot/pilot.sqlite`.
+Skripts vispirms izmanto stabilo GitHub Release assetu `pilot-dataset-latest/pilot-dataset.zip`; ja vajag, to var pārslēgt uz Actions artefaktiem ar `--source actions`.
 
 ### Demo pārbaude
 
@@ -89,7 +98,7 @@ API noklusēti izmanto `postgresql://nolemumi:nolemumi@localhost:5432/nolemumi`.
 ## GitHub Actions
 
 - `.github/workflows/sync.yml` lejupielādē DAGR CSV un saglabā datus kā artefaktu.
-- `.github/workflows/build_pilot_dataset.yml` būvē `pilot/pilot.sqlite`, saglabā to kā artefaktu un publicē repo, ja datubāze mainās.
+- `.github/workflows/build_pilot_dataset.yml` būvē `pilot/pilot.sqlite`, saglabā to kā Actions artefaktu un publicē jaunāko ZIP GitHub Release `pilot-dataset-latest`.
 
 ## Šīs nedēļas attīstības fokuss
 

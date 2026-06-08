@@ -65,6 +65,10 @@ jobs:
           BATCH_SIZE="${{ github.event.inputs.batch_size || '500' }}"
           python scripts/build_pilot_sqlite.py "$CSV_FILE" --target-total "$TARGET_TOTAL" --batch-size "$BATCH_SIZE" --sleep 0.2
 
+      - name: Classify legal topics
+        run: |
+          python scripts/classify_topics.py --refresh --limit 1500
+
       - name: Upload pilot artifact
         uses: actions/upload-artifact@v4
         with:

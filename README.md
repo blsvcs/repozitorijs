@@ -29,6 +29,7 @@ Projekta pašreizējais fokuss ir praktisks pilots: lietotājs var meklēt nolē
 Detalizētāks audits: `docs/DATA_AUDIT.md`.
 Demo scenāriji: `docs/DEMO_SCENARIOS.md`.
 AI, semantika un publicēšana: `docs/AI_SEMANTIC_DEPLOYMENT.md`.
+Hostinga soļi: `docs/DEPLOYMENT.md`.
 
 ## Ātrā palaišana
 
@@ -99,6 +100,16 @@ API noklusēti izmanto `postgresql://nolemumi:nolemumi@localhost:5432/nolemumi`.
 
 - `.github/workflows/sync.yml` lejupielādē DAGR CSV un saglabā datus kā artefaktu.
 - `.github/workflows/build_pilot_dataset.yml` būvē `pilot/pilot.sqlite`, saglabā to kā Actions artefaktu un publicē jaunāko ZIP GitHub Release `pilot-dataset-latest`.
+
+## Publicēšana
+
+Streamlit hostingam kā galveno failu norādi:
+
+```bash
+streamlit_entrypoint.py
+```
+
+Detalizēti soļi: `docs/DEPLOYMENT.md`.
 
 ## Šīs nedēļas attīstības fokuss
 

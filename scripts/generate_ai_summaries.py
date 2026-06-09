@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate cached AI summaries for the pilot SQLite database using GitHub Models.
+"""Generate cached AI summaries for the pilot SQLite database.
 
 The script is intentionally batch-oriented and safe for free/limited quotas.
 It only processes decisions that do not already have an AI summary.
@@ -8,7 +8,10 @@ Usage:
   python scripts/generate_ai_summaries.py --limit 10
 
 Environment:
-  GITHUB_TOKEN is used by default.
+  OPENAI_API_KEY is used first when available.
+  OPENAI_BASE_URL defaults to https://api.openai.com/v1
+  OPENAI_MODEL defaults to gpt-4o-mini
+  GITHUB_TOKEN is supported as a fallback for GitHub Models.
   GITHUB_MODELS_ENDPOINT defaults to https://models.github.ai/inference
   GITHUB_MODELS_MODEL defaults to deepseek/DeepSeek-V3-0324
 """
@@ -26,6 +29,8 @@ from pathlib import Path
 from typing import Any
 
 DB_PATH = Path("pilot/pilot.sqlite")
+DEFAULT_OPENAI_ENDPOINT = "https://api.openai.com/v1"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_ENDPOINT = "https://models.github.ai/inference"
 DEFAULT_MODEL = "deepseek/DeepSeek-V3-0324"
 
@@ -175,7 +180,7 @@ def main() -> int:
     parser.add_argument("--db", type=Path, default=DB_PATH)
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--sleep", type=float, default=1.0)
-    parser.add_argument("--model", default=os.environ.get("GITHUB_MODELS_MODEL", DEFAULT_MODEL))
+    parser.add_argument("--model", default=os.environ.get("OPENAI_MODEL") or os.environ.get("GITHUB_MODELS_MODEL") or DEFAULT_OPENAI_MODEL)
     parser.add_argument("--dry-run", action="store_true", help="Show pending rows and a prompt preview without calling an AI model.")
     args = parser.parse_args()
 
@@ -193,16 +198,25 @@ def main() -> int:
                 print(build_prompt(rows[0])[:3000])
             return 0
 
-        token = os.environ.get("GITHUB_TOKEN")
-        if not token:
-            raise SystemExit("GITHUB_TOKEN is not available. Run this in GitHub Actions or Codespaces.")
-
         try:
             from openai import OpenAI
         except ModuleNotFoundError as exc:
             raise SystemExit("openai package is not installed. Run: pip install -r requirements.txt") from exc
 
-        endpoint = os.environ.get("GITHUB_MODELS_ENDPOINT", DEFAULT_ENDPOINT)
+        openai_token = os.environ.get("OPENAI_API_KEY")
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if openai_token:
+            endpoint = os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_ENDPOINT)
+            token = openai_token
+        elif github_token:
+            endpoint = os.environ.get("GITHUB_MODELS_ENDPOINT", DEFAULT_ENDPOINT)
+            token = github_token
+            args.model = os.environ.get("GITHUB_MODELS_MODEL", DEFAULT_MODEL)
+        else:
+            raise SystemExit("OPENAI_API_KEY or GITHUB_TOKEN is not available.")
+
+        print(f"AI endpoint: {endpoint}")
+        print(f"AI model: {args.model}")
         client = OpenAI(base_url=endpoint, api_key=token)
 
         for idx, row in enumerate(rows, start=1):

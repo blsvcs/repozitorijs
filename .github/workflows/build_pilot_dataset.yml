@@ -93,6 +93,7 @@ jobs:
           python scripts/build_semantic_index.py --limit "$SEMANTIC_LIMIT" --batch-size 64
 
       - name: Generate AI summaries
+        # Runs only when OPENAI_API_KEY is configured as a repository secret.
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}

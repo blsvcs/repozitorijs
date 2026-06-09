@@ -18,6 +18,7 @@ DB_PATH = Path(tempfile.gettempdir()) / "repozitorijs-pilot.sqlite"
 RELEASE_DATASET_URL = "https://github.com/blsvcs/repozitorijs/releases/download/pilot-dataset-latest/pilot-dataset.zip"
 MIN_RELEASE_DOCUMENTS = 2000
 MIN_RELEASE_TOPICS = 1000
+MIN_RELEASE_AI = 50
 EXAMPLE_QUERIES = [
     "kredīta parāds",
     "kredīta procentu piedziņu",
@@ -71,7 +72,13 @@ def database_needs_refresh(path: Path) -> bool:
             documents = safe_count(conn, "select count(*) from documents")
             with_text = safe_count(conn, "select count(*) from documents where extracted_text is not null and extracted_text<>''")
             topics_count = safe_count(conn, "select count(*) from case_topics")
-        return documents < MIN_RELEASE_DOCUMENTS or with_text < MIN_RELEASE_DOCUMENTS or topics_count < MIN_RELEASE_TOPICS
+            ai_count = safe_count(conn, "select count(*) from ai_summaries where error_message is null")
+        return (
+            documents < MIN_RELEASE_DOCUMENTS
+            or with_text < MIN_RELEASE_DOCUMENTS
+            or topics_count < MIN_RELEASE_TOPICS
+            or ai_count < MIN_RELEASE_AI
+        )
     except sqlite3.Error:
         return True
 

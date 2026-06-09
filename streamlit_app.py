@@ -135,7 +135,7 @@ def fallback_search(
     topic_select = (
         "t.topic as topic, t.score as topic_score, coalesce(t.matched_keywords, '') as matched_keywords,"
         if topic
-        else "coalesce(t2.topic, '') as topic, coalesce(t2.score, 0) as topic_score, coalesce(t2.matched_keywords, '') as matched_keywords,"
+        else "'' as topic, 0 as topic_score, '' as matched_keywords,"
     )
     params.append(limit)
     sql = f"""
@@ -146,7 +146,6 @@ def fallback_search(
            0 as rank
     from documents docs
     {' '.join(joins)}
-    {"left join case_topics t2 on t2.materialfileid = d.materialfileid" if not topic else ""}
     where {' and '.join(where)}
     limit ?
     """
@@ -171,7 +170,7 @@ def search(db: str, query: str, court: str | None, topic: str | None, limit: int
     topic_select = (
         "t.topic as topic, t.score as topic_score, coalesce(t.matched_keywords, '') as matched_keywords,"
         if topic
-        else "coalesce(t2.topic, '') as topic, coalesce(t2.score, 0) as topic_score, coalesce(t2.matched_keywords, '') as matched_keywords,"
+        else "'' as topic, 0 as topic_score, '' as matched_keywords,"
     )
     params.append(limit)
     sql = f"""
@@ -182,7 +181,6 @@ def search(db: str, query: str, court: str | None, topic: str | None, limit: int
            bm25(documents_fts) as rank
     from documents_fts
     {' '.join(joins)}
-    {"left join case_topics t2 on t2.materialfileid = d.materialfileid" if not topic else ""}
     where {' and '.join(where)}
     order by rank
     limit ?

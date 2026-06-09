@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import html
+import io
 import re
 import sqlite3
 import shutil
@@ -284,10 +286,7 @@ def ai_summary(db: str, materialfileid: str) -> dict | None:
 @st.cache_data(show_spinner=False)
 def answer_question(db: str, question: str, topic: str | None, limit: int = 8) -> list[dict]:
     rows = search(db, question, None, topic, limit)
-    for row in rows:
-        ai = ai_summary(db, row["materialfileid"])
-        row["answer_text"] = ai["summary"] if ai and ai.get("summary") else clean_text(row.get("snippet"))
-    return rows
+    return enrich_rows_with_ai(db, rows)
 
 
 def result_title(row: dict) -> str:
@@ -296,6 +295,47 @@ def result_title(row: dict) -> str:
 
 def source_label(row: dict) -> str:
     return f"{result_title(row)} ({row.get('court') or '-'}, {row.get('registrationdate') or '-'})"
+
+
+def enrich_rows_with_ai(db: str, rows: list[dict]) -> list[dict]:
+    enriched = []
+    for row in rows:
+        item = dict(row)
+        ai = ai_summary(db, item["materialfileid"])
+        if ai:
+            item.update(
+                {
+                    "ai_summary": ai.get("summary", ""),
+                    "ai_legal_issue": ai.get("legal_issue", ""),
+                    "ai_court_reasoning": ai.get("court_reasoning", ""),
+                    "ai_outcome": ai.get("outcome", ""),
+                }
+            )
+        item["answer_text"] = item.get("ai_summary") or clean_text(item.get("snippet"))
+        enriched.append(item)
+    return enriched
+
+
+def rows_to_csv(rows: list[dict]) -> str:
+    output = io.StringIO()
+    fields = [
+        "casenumber",
+        "court",
+        "registrationdate",
+        "processtype",
+        "materialtype",
+        "topic",
+        "ai_summary",
+        "ai_legal_issue",
+        "ai_outcome",
+        "downloadurl",
+        "materialfileid",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({field: clean_text(row.get(field)) for field in fields})
+    return "\ufeff" + output.getvalue()
 
 
 def build_report(question: str, rows: list[dict]) -> str:
@@ -317,10 +357,124 @@ def build_report(question: str, rows: list[dict]) -> str:
             "",
             f"### {index}. {source_label(row)}",
             f"Tēma: {row.get('topic') or 'Bez tēmas'}",
+            f"Juridiskais jautājums: {row.get('ai_legal_issue') or 'nav automātiski noteikts'}",
+            f"Iznākums: {row.get('ai_outcome') or 'nav automātiski noteikts'}",
             "",
             row.get("answer_text") or clean_text(row.get("snippet")) or "Fragments nav pieejams.",
         ]
     return "\n".join(lines)
+
+
+def build_html_report(question: str, rows: list[dict]) -> str:
+    body = [
+        "<!doctype html><html lang='lv'><head><meta charset='utf-8'>",
+        "<title>Juridiskās prakses pārskats</title>",
+        "<style>body{font-family:Arial,sans-serif;max-width:920px;margin:40px auto;line-height:1.55;color:#1f2937}"
+        "h1{border-bottom:3px solid #2563eb;padding-bottom:12px}h2{color:#1d4ed8;margin-top:28px}"
+        ".case{border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin:16px 0}.meta{color:#6b7280}"
+        ".label{font-weight:700;color:#374151}</style></head><body>",
+        "<h1>Juridiskās prakses pārskata melnraksts</h1>",
+        f"<p><span class='label'>Jautājums:</span> {html.escape(question)}</p>",
+        f"<p><span class='label'>Atlasītie nolēmumi:</span> {len(rows)}</p>",
+        "<h2>Avoti</h2>",
+    ]
+    for index, row in enumerate(rows, 1):
+        body.extend(
+            [
+                "<section class='case'>",
+                f"<h3>{index}. {html.escape(source_label(row))}</h3>",
+                f"<p class='meta'>{html.escape(clean_text(row.get('processtype')) or '-')} · {html.escape(clean_text(row.get('materialtype')) or '-')}</p>",
+                f"<p><span class='label'>Tēma:</span> {html.escape(clean_text(row.get('topic')) or 'Bez tēmas')}</p>",
+                f"<p><span class='label'>Juridiskais jautājums:</span> {html.escape(clean_text(row.get('ai_legal_issue')) or 'nav automātiski noteikts')}</p>",
+                f"<p><span class='label'>Iznākums:</span> {html.escape(clean_text(row.get('ai_outcome')) or 'nav automātiski noteikts')}</p>",
+                f"<p>{html.escape(row.get('answer_text') or clean_text(row.get('snippet')) or 'Fragments nav pieejams.')}</p>",
+            ]
+        )
+        if row.get("downloadurl"):
+            body.append(f"<p><a href='{html.escape(row['downloadurl'])}'>Atvērt avota PDF</a></p>")
+        body.append("</section>")
+    body.append("</body></html>")
+    return "\n".join(body)
+
+
+def build_rtf_report(question: str, rows: list[dict]) -> str:
+    def rtf_escape(value: object) -> str:
+        text = clean_text(str(value or ""))
+        escaped = []
+        for char in text:
+            code = ord(char)
+            if char == "\\":
+                escaped.append("\\\\")
+            elif char == "{":
+                escaped.append("\\{")
+            elif char == "}":
+                escaped.append("\\}")
+            elif char == "\n":
+                escaped.append("\\par ")
+            elif code > 127:
+                if code > 32767:
+                    code -= 65536
+                escaped.append(rf"\u{code}?")
+            else:
+                escaped.append(char)
+        return "".join(escaped)
+
+    parts = [
+        r"{\rtf1\ansi\deff0",
+        r"{\fonttbl{\f0 Arial;}}",
+        r"\fs28\b Juridiskās prakses pārskata melnraksts\b0\par",
+        rf"\fs22 Jautājums: {rtf_escape(question)}\par",
+        rf"Atlasītie nolēmumi: {len(rows)}\par\par",
+    ]
+    for index, row in enumerate(rows, 1):
+        parts.extend(
+            [
+                rf"\b {index}. {rtf_escape(source_label(row))}\b0\par",
+                rf"Tēma: {rtf_escape(row.get('topic') or 'Bez tēmas')}\par",
+                rf"Juridiskais jautājums: {rtf_escape(row.get('ai_legal_issue') or 'nav automātiski noteikts')}\par",
+                rf"Iznākums: {rtf_escape(row.get('ai_outcome') or 'nav automātiski noteikts')}\par",
+                rf"{rtf_escape(row.get('answer_text') or row.get('snippet') or 'Fragments nav pieejams.')}\par\par",
+            ]
+        )
+    parts.append("}")
+    return "\n".join(parts)
+
+
+def render_report_downloads(question: str, rows: list[dict], filename_base: str) -> str:
+    markdown_report = build_report(question, rows)
+    html_report = build_html_report(question, rows)
+    rtf_report = build_rtf_report(question, rows)
+    csv_report = rows_to_csv(rows)
+    cols = st.columns(4)
+    cols[0].download_button(
+        "Markdown",
+        markdown_report,
+        file_name=f"{filename_base}.md",
+        mime="text/markdown",
+        width="stretch",
+    )
+    cols[1].download_button(
+        "HTML / PDF",
+        html_report,
+        file_name=f"{filename_base}.html",
+        mime="text/html",
+        width="stretch",
+    )
+    cols[2].download_button(
+        "Word / RTF",
+        rtf_report,
+        file_name=f"{filename_base}.rtf",
+        mime="application/rtf",
+        width="stretch",
+    )
+    cols[3].download_button(
+        "CSV",
+        csv_report,
+        file_name=f"{filename_base}.csv",
+        mime="text/csv",
+        width="stretch",
+    )
+    return markdown_report
 
 
 def render_result(row: dict, index: int, query: str) -> bool:
@@ -330,15 +484,32 @@ def render_result(row: dict, index: int, query: str) -> bool:
         for value in [row.get("court"), row.get("registrationdate"), row.get("processtype"), row.get("materialtype")]
     )
     topic = clean_text(row.get("topic")) or "Bez tēmas"
+    ai = ai_summary(str(DB_PATH), row["materialfileid"])
+    has_ai = bool(ai and ai.get("summary"))
+    summary = clean_text(ai.get("summary")) if ai else ""
+    legal_issue = clean_text(ai.get("legal_issue")) if ai else ""
+    outcome = clean_text(ai.get("outcome")) if ai else ""
+    reasoning = clean_text(ai.get("court_reasoning")) if ai else ""
     snippet = clean_snippet(row.get("snippet")) or "Fragments nav pieejams."
+    badge = "<span class='ai-badge'>AI kopsavilkums</span>" if has_ai else "<span class='plain-badge'>Fragments</span>"
+    main_text = html.escape(summary) if summary else snippet
+    detail_rows = ""
+    if legal_issue:
+        detail_rows += f"<div><strong>Juridiskais jautājums:</strong> {html.escape(legal_issue)}</div>"
+    if outcome:
+        detail_rows += f"<div><strong>Iznākums:</strong> {html.escape(outcome)}</div>"
+    if reasoning:
+        detail_rows += f"<div><strong>Tiesas pamatojums:</strong> {html.escape(reasoning)}</div>"
     st.markdown(
         f"""
         <div class="card">
-          <strong>#{index} · Lieta {title}</strong>
+          <strong>#{index} · Lieta {title}</strong> {badge}
           <span class="topic">{html.escape(topic)}</span>
           <div class="meta">{html.escape(meta)}</div>
           <div class="why">Atrasts pēc vaicājuma: “{html.escape(query)}”</div>
-          <strong>Fragments:</strong><br>{snippet}
+          <div class="summary">{main_text}</div>
+          <div class="details">{detail_rows}</div>
+          <details><summary>Avota fragments</summary><div class="snippet">{snippet}</div></details>
         </div>
         """,
         unsafe_allow_html=True,
@@ -363,6 +534,11 @@ st.markdown(
     .meta{color:#5f6673;font-size:.92rem;margin:.35rem 0 .55rem}
     .topic{background:#eef4ff;color:#2457a6;border:1px solid #c9d8ff;border-radius:999px;padding:.08rem .5rem;font-size:.82rem;margin-left:.35rem}
     .why{color:#6b7280;font-size:.88rem;margin-bottom:.6rem}
+    .summary{background:#f8fafc;border-left:4px solid #2563eb;border-radius:6px;padding:.7rem;margin:.6rem 0}
+    .details{font-size:.92rem;color:#374151;display:grid;gap:.35rem;margin:.5rem 0}
+    .snippet{margin-top:.45rem;color:#374151}
+    .ai-badge{background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;border-radius:999px;padding:.08rem .5rem;font-size:.82rem;margin-left:.35rem}
+    .plain-badge{background:#f3f4f6;color:#4b5563;border:1px solid #d1d5db;border-radius:999px;padding:.08rem .5rem;font-size:.82rem;margin-left:.35rem}
     </style>
     """,
     unsafe_allow_html=True,
@@ -418,9 +594,8 @@ with st.expander("💬 Jautājums nolēmumu datubāzei", expanded=True):
             st.markdown("**Īsa sintēze no atrastajiem avotiem:**")
             for number, answer in enumerate(answers[:5], 1):
                 st.markdown(f"{number}. {answer.get('answer_text') or 'Avotā ir fragments, bet kopsavilkums vēl nav sagatavots.'}")
-            report = build_report(question, answers)
             with st.expander("🧾 Gudrais ziņojums"):
-                st.download_button("⬇️ Lejupielādēt Markdown", report, file_name="gudrais_zinojums.md", mime="text/markdown")
+                report = render_report_downloads(question, answers, "gudrais_zinojums")
                 st.text_area("Ziņojuma teksts", report, height=420)
             st.markdown("**Avoti:**")
             for answer in answers:
@@ -463,13 +638,11 @@ if not rows:
 selected_rows = []
 for index, row in enumerate(rows, 1):
     if render_result(row, index, query):
-        row = dict(row)
-        row["answer_text"] = clean_text(row.get("snippet"))
         selected_rows.append(row)
 
 if selected_rows:
+    selected_rows = enrich_rows_with_ai(str(DB_PATH), selected_rows)
     st.divider()
     st.subheader(f"Pārskats no atlasītajiem nolēmumiem: {len(selected_rows)}")
-    selected_report = build_report(query, selected_rows)
-    st.download_button("⬇️ Lejupielādēt Markdown", selected_report, file_name="atlasitie_nolemumi.md", mime="text/markdown")
+    selected_report = render_report_downloads(query, selected_rows, "atlasitie_nolemumi")
     st.text_area("Pārskata teksts", selected_report, height=420)

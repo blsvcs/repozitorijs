@@ -3,6 +3,9 @@ from __future__ import annotations
 import html
 import re
 import sqlite3
+import tempfile
+import urllib.request
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -10,6 +13,9 @@ import streamlit as st
 
 
 DB_PATH = Path("pilot/pilot.sqlite")
+RELEASE_DATASET_URL = "https://github.com/blsvcs/repozitorijs/releases/download/pilot-dataset-latest/pilot-dataset.zip"
+MIN_RELEASE_DOCUMENTS = 2000
+MIN_RELEASE_TOPICS = 1000
 EXAMPLE_QUERIES = [
     "kredīta parāds",
     "kredīta procentu piedziņu",
@@ -53,6 +59,35 @@ def safe_count(conn: sqlite3.Connection, sql: str) -> int:
         return int(conn.execute(sql).fetchone()[0])
     except sqlite3.OperationalError:
         return 0
+
+
+def database_needs_refresh(path: Path) -> bool:
+    if not path.exists():
+        return True
+    try:
+        with sqlite3.connect(path) as conn:
+            documents = safe_count(conn, "select count(*) from documents")
+            with_text = safe_count(conn, "select count(*) from documents where extracted_text is not null and extracted_text<>''")
+            topics_count = safe_count(conn, "select count(*) from case_topics")
+        return documents < MIN_RELEASE_DOCUMENTS or with_text < MIN_RELEASE_DOCUMENTS or topics_count < MIN_RELEASE_TOPICS
+    except sqlite3.Error:
+        return True
+
+
+def refresh_database_from_release(path: Path) -> bool:
+    if not database_needs_refresh(path):
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        archive_path = tmp / "pilot-dataset.zip"
+        extracted_path = tmp / "pilot.sqlite"
+        with urllib.request.urlopen(RELEASE_DATASET_URL, timeout=180) as response:
+            archive_path.write_bytes(response.read())
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extract("pilot.sqlite", tmp)
+        extracted_path.replace(path)
+    return True
 
 
 @st.cache_data(show_spinner=False)
@@ -307,6 +342,16 @@ st.markdown(
 
 st.title("⚖️ Latvijas tiesu nolēmumu pilots")
 st.caption("Pilots tiesu nolēmumu pilnteksta meklēšanai, avotu pārbaudei un pārskatu melnrakstiem.")
+
+try:
+    with st.spinner("Pārbaudu pilotdatubāzi..."):
+        if refresh_database_from_release(DB_PATH):
+            st.success("Pilotdatubāze atjaunota no jaunākās publiskās datu kopas.")
+except Exception as exc:
+    if not DB_PATH.exists():
+        st.error(f"Neizdevās lejupielādēt pilotdatubāzi: {exc}")
+        st.stop()
+    st.warning("Neizdevās pārbaudīt jaunāko datubāzi, turpinu ar lokālo kopiju.")
 
 if not DB_PATH.exists():
     st.error(f"Datubāze nav atrasta: `{DB_PATH}`")

@@ -11,6 +11,10 @@ on:
         description: 'How many PDFs to download/extract in this run'
         required: false
         default: '500'
+      semantic_limit:
+        description: 'How many documents to index semantically'
+        required: false
+        default: '1500'
   schedule:
     - cron: '20 2 * * *'
   push:
@@ -20,6 +24,7 @@ on:
       - '.github/workflows/build_pilot_dataset.yml'
       - 'scripts/build_pilot_sqlite.py'
       - 'scripts/classify_topics.py'
+      - 'scripts/build_semantic_index.py'
       - 'sync_anon_nolemumi.py'
 
 permissions:
@@ -44,7 +49,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pypdf
+          pip install requests pypdf sentence-transformers
 
       - name: Download latest metadata CSV
         run: |
@@ -76,6 +81,11 @@ jobs:
       - name: Classify legal topics
         run: |
           python scripts/classify_topics.py --refresh --limit 1500
+
+      - name: Build semantic index
+        run: |
+          SEMANTIC_LIMIT="${{ github.event.inputs.semantic_limit || '1500' }}"
+          python scripts/build_semantic_index.py --limit "$SEMANTIC_LIMIT" --batch-size 64
 
       - name: Upload pilot artifact
         uses: actions/upload-artifact@v4

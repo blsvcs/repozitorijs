@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import re
 import sqlite3
+import shutil
 import tempfile
 import urllib.request
 import zipfile
@@ -12,7 +13,8 @@ import pandas as pd
 import streamlit as st
 
 
-DB_PATH = Path("pilot/pilot.sqlite")
+BUNDLED_DB_PATH = Path("pilot/pilot.sqlite")
+DB_PATH = Path(tempfile.gettempdir()) / "repozitorijs-pilot.sqlite"
 RELEASE_DATASET_URL = "https://github.com/blsvcs/repozitorijs/releases/download/pilot-dataset-latest/pilot-dataset.zip"
 MIN_RELEASE_DOCUMENTS = 2000
 MIN_RELEASE_TOPICS = 1000
@@ -74,9 +76,7 @@ def database_needs_refresh(path: Path) -> bool:
         return True
 
 
-def refresh_database_from_release(path: Path) -> bool:
-    if not database_needs_refresh(path):
-        return False
+def install_database_from_release(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -87,7 +87,28 @@ def refresh_database_from_release(path: Path) -> bool:
         with zipfile.ZipFile(archive_path) as archive:
             archive.extract("pilot.sqlite", tmp)
         extracted_path.replace(path)
-    return True
+
+
+def prepare_database() -> tuple[Path, str]:
+    if DB_PATH.exists() and not database_needs_refresh(DB_PATH):
+        return DB_PATH, "runtime"
+
+    if BUNDLED_DB_PATH.exists() and not database_needs_refresh(BUNDLED_DB_PATH):
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(BUNDLED_DB_PATH, DB_PATH)
+        st.cache_data.clear()
+        return DB_PATH, "bundled"
+
+    try:
+        install_database_from_release(DB_PATH)
+        st.cache_data.clear()
+        return DB_PATH, "release"
+    except Exception:
+        if DB_PATH.exists():
+            return DB_PATH, "stale-runtime"
+        if BUNDLED_DB_PATH.exists():
+            return BUNDLED_DB_PATH, "stale-bundled"
+        raise
 
 
 @st.cache_data(show_spinner=False)
@@ -345,8 +366,12 @@ st.caption("Pilots tiesu nolēmumu pilnteksta meklēšanai, avotu pārbaudei un 
 
 try:
     with st.spinner("Pārbaudu pilotdatubāzi..."):
-        if refresh_database_from_release(DB_PATH):
+        active_db_path, db_source = prepare_database()
+        DB_PATH = active_db_path
+        if db_source == "release":
             st.success("Pilotdatubāze atjaunota no jaunākās publiskās datu kopas.")
+        elif db_source in {"stale-runtime", "stale-bundled"}:
+            st.warning("Neizdevās atjaunot jaunāko datubāzi, turpinu ar vecāku lokālo kopiju.")
 except Exception as exc:
     if not DB_PATH.exists():
         st.error(f"Neizdevās lejupielādēt pilotdatubāzi: {exc}")

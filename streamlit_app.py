@@ -652,81 +652,58 @@ with st.expander("Datu statuss", expanded=False):
     p1.progress(pct(s["with_text"], s["documents"]) / 100, text=f"Teksts: {s['with_text']} no {s['documents']}")
     p2.progress(pct(s["fts"], s["with_text"]) / 100, text=f"Meklēšanas indekss: {s['fts']} no {s['with_text']}")
 
-search_tab, question_tab = st.tabs(["Meklēt nolēmumus", "Uzdot jautājumu"])
+st.markdown("<section class='work-panel'>", unsafe_allow_html=True)
+render_quick_queries()
+search_col, limit_col = st.columns([4, 1])
+with search_col:
+    query = st.text_input(
+        "Darba jautājums vai frāze",
+        placeholder="piemēram: kredīta parāds vai kā tiesas vērtē kredīta procentu piedziņu?",
+        key="search_query",
+    )
+with limit_col:
+    limit = st.slider("Skaits", 5, 50, 10, 5)
+with st.expander("Filtri", expanded=False):
+    filter_col1, filter_col2 = st.columns(2)
+    with filter_col1:
+        court_choice = st.selectbox("Tiesa", ["Visas"] + courts(str(DB_PATH)))
+    with filter_col2:
+        topic_choice = st.selectbox("Tēma", ["Visas"] + topics(str(DB_PATH)))
+st.markdown("</section>", unsafe_allow_html=True)
 
-with search_tab:
-    st.markdown("<section class='work-panel'>", unsafe_allow_html=True)
-    render_quick_queries()
-    search_col, limit_col = st.columns([4, 1])
-    with search_col:
-        query = st.text_input("Meklējamā frāze", placeholder="piemēram: kredīta parāds", key="search_query")
-    with limit_col:
-        limit = st.slider("Skaits", 5, 50, 10, 5)
-    with st.expander("Filtri", expanded=False):
-        filter_col1, filter_col2 = st.columns(2)
-        with filter_col1:
-            court_choice = st.selectbox("Tiesa", ["Visas"] + courts(str(DB_PATH)))
-        with filter_col2:
-            topic_choice = st.selectbox("Tēma", ["Visas"] + topics(str(DB_PATH)))
-    st.markdown("</section>", unsafe_allow_html=True)
+selected_court = None if court_choice == "Visas" else court_choice
+selected_topic = None if topic_choice == "Visas" else topic_choice
 
-    selected_court = None if court_choice == "Visas" else court_choice
-    selected_topic = None if topic_choice == "Visas" else topic_choice
+if not query:
+    st.markdown(
+        "<div class='empty-state'>Ievadi jautājumu vai frāzi. Zemāk uzreiz parādīsies avoti un pārskata melnraksts.</div>",
+        unsafe_allow_html=True,
+    )
+    overview = topic_overview(str(DB_PATH))
+    if not overview.empty:
+        st.subheader("Tēmu pārskats")
+        st.bar_chart(overview.set_index("Tēma"))
+    st.stop()
 
-    if not query:
-        st.markdown(
-            "<div class='empty-state'>Izvēlies ātro vaicājumu vai ievadi frāzi.</div>",
-            unsafe_allow_html=True,
-        )
-        overview = topic_overview(str(DB_PATH))
-        if not overview.empty:
-            st.subheader("Tēmu pārskats")
-            st.bar_chart(overview.set_index("Tēma"))
-    else:
-        rows = search(str(DB_PATH), query, selected_court, selected_topic, limit)
-        st.subheader(f"Atrasti rezultāti: {len(rows)}")
-        if not rows:
-            st.warning("Nav rezultātu ar pašreizējiem filtriem.")
-        else:
-            selected_rows = []
-            for index, row in enumerate(rows, 1):
-                if render_result(row, index, query):
-                    selected_rows.append(row)
+rows = search(str(DB_PATH), query, selected_court, selected_topic, limit)
+st.subheader(f"Atrasti rezultāti: {len(rows)}")
+if not rows:
+    st.warning("Nav rezultātu ar pašreizējiem filtriem.")
+    st.stop()
 
-            if selected_rows:
-                selected_rows = enrich_rows_with_ai(str(DB_PATH), selected_rows)
-                st.divider()
-                st.subheader(f"Pārskats no atlasītajiem nolēmumiem: {len(selected_rows)}")
-                selected_report = render_report_downloads(query, selected_rows, "atlasitie_nolemumi")
-                st.text_area("Pārskata teksts", selected_report, height=420)
+report_rows = enrich_rows_with_ai(str(DB_PATH), rows[:8])
+with st.expander("Gudrais ziņojums no atrastajiem avotiem", expanded=False):
+    report = render_report_downloads(query, report_rows, "gudrais_zinojums")
+    st.text_area("Ziņojuma teksts", report, height=360)
 
-with question_tab:
-    st.markdown("<section class='work-panel'>", unsafe_allow_html=True)
-    qa_col1, qa_col2 = st.columns([3, 1])
-    with qa_col1:
-        question = st.text_input("Jautājums", placeholder="piemēram: kredīta procentu piedziņu")
-    with qa_col2:
-        qa_topic_choice = st.selectbox("Tēma", ["Visas"] + topics(str(DB_PATH)), key="qa_topic")
-    st.markdown("</section>", unsafe_allow_html=True)
-    if question:
-        qa_topic = None if qa_topic_choice == "Visas" else qa_topic_choice
-        answers = answer_question(str(DB_PATH), question, qa_topic, 8)
-        if not answers:
-            st.warning("Nav atrasti pietiekami atbilstoši nolēmumi. Pamēģini īsāku jautājumu vai noņem tēmas filtru.")
-        else:
-            st.subheader("Sintēze")
-            for number, answer in enumerate(answers[:5], 1):
-                st.markdown(f"{number}. {answer.get('answer_text') or 'Avotā ir fragments, bet kopsavilkums vēl nav sagatavots.'}")
-            with st.expander("Gudrais ziņojums", expanded=True):
-                report = render_report_downloads(question, answers, "gudrais_zinojums")
-                st.text_area("Ziņojuma teksts", report, height=420)
-            st.subheader("Avoti")
-            for answer in answers:
-                st.markdown(f"**{source_label(answer)}** · {answer.get('topic') or 'Bez tēmas'}")
-                if answer.get("downloadurl"):
-                    st.link_button("Atvērt PDF", answer["downloadurl"], key=f"qa-pdf-{answer['materialfileid']}")
-    else:
-        st.markdown(
-            "<div class='empty-state'>Ievadi jautājumu, lai saņemtu īsu sintēzi no atrastajiem avotiem.</div>",
-            unsafe_allow_html=True,
-        )
+selected_rows = []
+for index, row in enumerate(rows, 1):
+    if render_result(row, index, query):
+        selected_rows.append(row)
+
+if selected_rows:
+    selected_rows = enrich_rows_with_ai(str(DB_PATH), selected_rows)
+    st.divider()
+    st.subheader(f"Pārskats no atlasītajiem nolēmumiem: {len(selected_rows)}")
+    selected_report = render_report_downloads(query, selected_rows, "atlasitie_nolemumi")
+    st.text_area("Pārskata teksts", selected_report, height=420)

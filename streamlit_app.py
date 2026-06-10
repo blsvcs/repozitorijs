@@ -297,6 +297,22 @@ def source_label(row: dict) -> str:
     return f"{result_title(row)} ({row.get('court') or '-'}, {row.get('registrationdate') or '-'})"
 
 
+def source_reference(row: dict) -> str:
+    parts = [
+        clean_text(row.get("court")) or "Tiesa nav norādīta",
+        f"lieta {result_title(row)}",
+        clean_text(row.get("registrationdate")) or "datums nav norādīts",
+    ]
+    reference = ", ".join(parts)
+    if row.get("downloadurl"):
+        reference += f". Avots: {row['downloadurl']}"
+    return reference
+
+
+def source_excerpt(row: dict) -> str:
+    return clean_text(row.get("snippet")) or "Avota fragments nav pieejams."
+
+
 def enrich_rows_with_ai(db: str, rows: list[dict]) -> list[dict]:
     enriched = []
     for row in rows:
@@ -312,6 +328,8 @@ def enrich_rows_with_ai(db: str, rows: list[dict]) -> list[dict]:
                 }
             )
         item["answer_text"] = item.get("ai_summary") or clean_text(item.get("snippet"))
+        item["source_reference"] = source_reference(item)
+        item["source_excerpt"] = source_excerpt(item)
         enriched.append(item)
     return enriched
 
@@ -328,6 +346,8 @@ def rows_to_csv(rows: list[dict]) -> str:
         "ai_summary",
         "ai_legal_issue",
         "ai_outcome",
+        "source_reference",
+        "source_excerpt",
         "downloadurl",
         "materialfileid",
     ]
@@ -359,8 +379,13 @@ def build_report(question: str, rows: list[dict]) -> str:
             f"Tēma: {row.get('topic') or 'Bez tēmas'}",
             f"Juridiskais jautājums: {row.get('ai_legal_issue') or 'nav automātiski noteikts'}",
             f"Iznākums: {row.get('ai_outcome') or 'nav automātiski noteikts'}",
+            f"Atsauce: {row.get('source_reference') or source_reference(row)}",
             "",
+            "Kopsavilkums:",
             row.get("answer_text") or clean_text(row.get("snippet")) or "Fragments nav pieejams.",
+            "",
+            "Pārbaudāmais avota fragments:",
+            row.get("source_excerpt") or source_excerpt(row),
         ]
     return "\n".join(lines)
 
@@ -387,7 +412,9 @@ def build_html_report(question: str, rows: list[dict]) -> str:
                 f"<p><span class='label'>Tēma:</span> {html.escape(clean_text(row.get('topic')) or 'Bez tēmas')}</p>",
                 f"<p><span class='label'>Juridiskais jautājums:</span> {html.escape(clean_text(row.get('ai_legal_issue')) or 'nav automātiski noteikts')}</p>",
                 f"<p><span class='label'>Iznākums:</span> {html.escape(clean_text(row.get('ai_outcome')) or 'nav automātiski noteikts')}</p>",
+                f"<p><span class='label'>Atsauce:</span> {html.escape(row.get('source_reference') or source_reference(row))}</p>",
                 f"<p>{html.escape(row.get('answer_text') or clean_text(row.get('snippet')) or 'Fragments nav pieejams.')}</p>",
+                f"<details><summary>Pārbaudāmais avota fragments</summary><p>{html.escape(row.get('source_excerpt') or source_excerpt(row))}</p></details>",
             ]
         )
         if row.get("downloadurl"):
@@ -433,7 +460,9 @@ def build_rtf_report(question: str, rows: list[dict]) -> str:
                 rf"Tēma: {rtf_escape(row.get('topic') or 'Bez tēmas')}\par",
                 rf"Juridiskais jautājums: {rtf_escape(row.get('ai_legal_issue') or 'nav automātiski noteikts')}\par",
                 rf"Iznākums: {rtf_escape(row.get('ai_outcome') or 'nav automātiski noteikts')}\par",
+                rf"Atsauce: {rtf_escape(row.get('source_reference') or source_reference(row))}\par",
                 rf"{rtf_escape(row.get('answer_text') or row.get('snippet') or 'Fragments nav pieejams.')}\par\par",
+                rf"Pārbaudāmais avota fragments: {rtf_escape(row.get('source_excerpt') or source_excerpt(row))}\par\par",
             ]
         )
     parts.append("}")
@@ -523,6 +552,7 @@ def render_result(row: dict, index: int, query: str) -> bool:
         detail_rows += f"<div><strong>Iznākums:</strong> {html.escape(outcome)}</div>"
     if reasoning:
         detail_rows += f"<div><strong>Tiesas pamatojums:</strong> {html.escape(reasoning)}</div>"
+    reference = source_reference(row)
     with st.container():
         st.markdown(
             f"""
@@ -543,13 +573,16 @@ def render_result(row: dict, index: int, query: str) -> bool:
             """,
             unsafe_allow_html=True,
         )
-        actions = st.columns([1, 1, 2])
+        actions = st.columns([1, 1, 1, 2])
         with actions[0]:
             selected = st.checkbox("Pārskatam", key=f"select-report-{row['materialfileid']}")
         with actions[1]:
             if row.get("downloadurl"):
                 st.link_button("Atvērt PDF", row["downloadurl"], width="stretch")
         with actions[2]:
+            with st.expander("Atsauce"):
+                st.code(reference, language=None)
+        with actions[3]:
             with st.expander("Pilns teksts"):
                 text = full_text(str(DB_PATH), row["materialfileid"])
                 st.text_area("Teksts", text[:100000], height=420) if text else st.info("Pilns teksts nav pieejams.")

@@ -477,6 +477,29 @@ def render_report_downloads(question: str, rows: list[dict], filename_base: str)
     return markdown_report
 
 
+def render_status_strip(data: dict[str, int]) -> None:
+    items = [
+        ("Dokumenti", f"{data['documents']:,}".replace(",", " ")),
+        ("Teksts", f"{data['with_text']:,}".replace(",", " ")),
+        ("AI", f"{data['ai']:,}".replace(",", " ")),
+        ("Indekss", f"{data['fts']:,}".replace(",", " ")),
+    ]
+    cards = "".join(
+        f"<div class='status-card'><span>{html.escape(label)}</span><strong>{html.escape(value)}</strong></div>"
+        for label, value in items
+    )
+    st.markdown(f"<div class='status-grid'>{cards}</div>", unsafe_allow_html=True)
+
+
+def render_quick_queries() -> None:
+    st.markdown("<div class='section-label'>Ātrie vaicājumi</div>", unsafe_allow_html=True)
+    cols = st.columns(3)
+    for index, example in enumerate(EXAMPLE_QUERIES):
+        if cols[index % 3].button(example, key=f"example-{example}", width="stretch"):
+            st.session_state["search_query"] = example
+            st.rerun()
+
+
 def render_result(row: dict, index: int, query: str) -> bool:
     title = html.escape(result_title(row))
     meta = " · ".join(
@@ -500,52 +523,101 @@ def render_result(row: dict, index: int, query: str) -> bool:
         detail_rows += f"<div><strong>Iznākums:</strong> {html.escape(outcome)}</div>"
     if reasoning:
         detail_rows += f"<div><strong>Tiesas pamatojums:</strong> {html.escape(reasoning)}</div>"
-    st.markdown(
-        f"""
-        <div class="card">
-          <strong>#{index} · Lieta {title}</strong> {badge}
-          <span class="topic">{html.escape(topic)}</span>
-          <div class="meta">{html.escape(meta)}</div>
-          <div class="why">Atrasts pēc vaicājuma: “{html.escape(query)}”</div>
-          <div class="summary">{main_text}</div>
-          <div class="details">{detail_rows}</div>
-          <details><summary>Avota fragments</summary><div class="snippet">{snippet}</div></details>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    left, right = st.columns([1, 3])
-    with left:
-        if row.get("downloadurl"):
-            st.link_button("📄 Atvērt PDF", row["downloadurl"])
-        selected = st.checkbox("Atlasīt pārskatam", key=f"select-report-{row['materialfileid']}")
-    with right:
-        with st.expander("Pilns teksts"):
-            text = full_text(str(DB_PATH), row["materialfileid"])
-            st.text_area("Teksts", text[:100000], height=420) if text else st.info("Pilns teksts nav pieejams.")
+    with st.container():
+        st.markdown(
+            f"""
+            <article class="case-card">
+              <div class="case-topline">
+                <div>
+                  <div class="case-index">Rezultāts {index}</div>
+                  <h3>Lieta {title}</h3>
+                </div>
+                <div class="badges">{badge}<span class="topic">{html.escape(topic)}</span></div>
+              </div>
+              <div class="meta">{html.escape(meta)}</div>
+              <div class="why">Vaicājums: “{html.escape(query)}”</div>
+              <div class="summary">{main_text}</div>
+              <div class="details">{detail_rows}</div>
+              <details><summary>Avota fragments</summary><div class="snippet">{snippet}</div></details>
+            </article>
+            """,
+            unsafe_allow_html=True,
+        )
+        actions = st.columns([1, 1, 2])
+        with actions[0]:
+            selected = st.checkbox("Pārskatam", key=f"select-report-{row['materialfileid']}")
+        with actions[1]:
+            if row.get("downloadurl"):
+                st.link_button("Atvērt PDF", row["downloadurl"], width="stretch")
+        with actions[2]:
+            with st.expander("Pilns teksts"):
+                text = full_text(str(DB_PATH), row["materialfileid"])
+                st.text_area("Teksts", text[:100000], height=420) if text else st.info("Pilns teksts nav pieejams.")
     return selected
 
 
 st.markdown(
     """
     <style>
+    :root{
+      --ink:#172033;--muted:#667085;--line:#e6e9ef;--paper:#ffffff;--soft:#f6f7f9;
+      --blue:#1d4ed8;--green:#047857;--amber:#a16207;
+    }
+    .block-container{max-width:1120px;padding-top:1.4rem;padding-bottom:4rem}
+    [data-testid="stSidebar"]{display:none}
+    h1,h2,h3{letter-spacing:0}
     mark{background:#fff3a3;padding:.05rem .18rem;border-radius:.2rem}
-    .card{border:1px solid #e5e7eb;border-radius:8px;padding:1rem;margin:.75rem 0;background:#fff}
-    .meta{color:#5f6673;font-size:.92rem;margin:.35rem 0 .55rem}
-    .topic{background:#eef4ff;color:#2457a6;border:1px solid #c9d8ff;border-radius:999px;padding:.08rem .5rem;font-size:.82rem;margin-left:.35rem}
-    .why{color:#6b7280;font-size:.88rem;margin-bottom:.6rem}
-    .summary{background:#f8fafc;border-left:4px solid #2563eb;border-radius:6px;padding:.7rem;margin:.6rem 0}
-    .details{font-size:.92rem;color:#374151;display:grid;gap:.35rem;margin:.5rem 0}
+    .app-masthead{border-bottom:1px solid var(--line);padding:.4rem 0 1rem;margin-bottom:1rem}
+    .eyebrow{font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}
+    .app-masthead h1{font-size:clamp(1.7rem,3vw,2.45rem);line-height:1.1;margin:.25rem 0;color:var(--ink)}
+    .app-masthead p{color:var(--muted);font-size:1rem;margin:.15rem 0 0;max-width:720px}
+    .status-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.65rem;margin:.9rem 0 1.1rem}
+    .status-card{border:1px solid var(--line);background:var(--paper);border-radius:8px;padding:.75rem .85rem}
+    .status-card span{display:block;color:var(--muted);font-size:.78rem;margin-bottom:.1rem}
+    .status-card strong{color:var(--ink);font-size:1.15rem}
+    .work-panel{border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,#fff,#fbfcfe);padding:1rem;margin:.8rem 0 1rem}
+    .section-label{font-size:.82rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin:.25rem 0 .45rem}
+    .case-card{border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:1rem;margin:1rem 0 .5rem;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+    .case-topline{display:flex;gap:.8rem;align-items:flex-start;justify-content:space-between}
+    .case-index{color:var(--muted);font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+    .case-card h3{font-size:1.06rem;line-height:1.25;margin:.12rem 0;color:var(--ink)}
+    .badges{display:flex;gap:.35rem;flex-wrap:wrap;justify-content:flex-end}
+    .meta{color:var(--muted);font-size:.9rem;margin:.45rem 0 .55rem}
+    .topic{background:#eef4ff;color:#2457a6;border:1px solid #c9d8ff;border-radius:999px;padding:.1rem .55rem;font-size:.78rem}
+    .why{color:var(--muted);font-size:.86rem;margin-bottom:.65rem}
+    .summary{background:#f8fafc;border-left:4px solid var(--blue);border-radius:6px;padding:.78rem;margin:.6rem 0;color:#243044}
+    .details{font-size:.92rem;color:#374151;display:grid;gap:.35rem;margin:.55rem 0}
     .snippet{margin-top:.45rem;color:#374151}
-    .ai-badge{background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;border-radius:999px;padding:.08rem .5rem;font-size:.82rem;margin-left:.35rem}
-    .plain-badge{background:#f3f4f6;color:#4b5563;border:1px solid #d1d5db;border-radius:999px;padding:.08rem .5rem;font-size:.82rem;margin-left:.35rem}
+    .ai-badge{background:#ecfdf5;color:var(--green);border:1px solid #a7f3d0;border-radius:999px;padding:.1rem .55rem;font-size:.78rem}
+    .plain-badge{background:#f3f4f6;color:#4b5563;border:1px solid #d1d5db;border-radius:999px;padding:.1rem .55rem;font-size:.78rem}
+    .empty-state{border:1px dashed #cbd5e1;border-radius:8px;background:#fafafa;padding:1rem;color:var(--muted);margin-top:1rem}
+    div[data-testid="stTextInput"] input{border-radius:8px}
+    div[data-testid="stButton"] button, div[data-testid="stDownloadButton"] button, a[data-testid="stLinkButton"]{
+      border-radius:8px!important;font-weight:650
+    }
+    @media (max-width: 760px){
+      .block-container{padding-left:.85rem;padding-right:.85rem;padding-top:.9rem}
+      .status-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .work-panel{padding:.85rem}
+      .case-topline{display:block}
+      .badges{justify-content:flex-start;margin-top:.45rem}
+      .case-card{padding:.9rem}
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("⚖️ Latvijas tiesu nolēmumu pilots")
-st.caption("Pilots tiesu nolēmumu pilnteksta meklēšanai, avotu pārbaudei un pārskatu melnrakstiem.")
+st.markdown(
+    """
+    <header class="app-masthead">
+      <div class="eyebrow">Tiesu nolēmumu darba vide</div>
+      <h1>Latvijas tiesu nolēmumi</h1>
+      <p>Meklēšana, avotu pārbaude un pārskata melnraksts vienā jurista darba plūsmā.</p>
+    </header>
+    """,
+    unsafe_allow_html=True,
+)
 
 try:
     with st.spinner("Pārbaudu pilotdatubāzi..."):
@@ -566,12 +638,13 @@ if not DB_PATH.exists():
     st.stop()
 
 s = stats(str(DB_PATH))
-with st.expander("📌 Vadības panelis", expanded=True):
+render_status_strip(s)
+with st.expander("Datu statuss", expanded=False):
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("Metadati", s["metadata"])
     c2.metric("Dokumenti", s["documents"])
-    c3.metric("Lejupielādēti", s["downloaded"])
-    c4.metric("Ar tekstu", s["with_text"])
+    c3.metric("PDF", s["downloaded"])
+    c4.metric("Teksts", s["with_text"])
     c5.metric("AI", s["ai"])
     c6.metric("Semantika", s["semantic"])
     c7.metric("Tēmas", s["topics"])
@@ -579,70 +652,81 @@ with st.expander("📌 Vadības panelis", expanded=True):
     p1.progress(pct(s["with_text"], s["documents"]) / 100, text=f"Teksts: {s['with_text']} no {s['documents']}")
     p2.progress(pct(s["fts"], s["with_text"]) / 100, text=f"Meklēšanas indekss: {s['fts']} no {s['with_text']}")
 
-with st.expander("💬 Jautājums nolēmumu datubāzei", expanded=True):
+search_tab, question_tab = st.tabs(["Meklēt nolēmumus", "Uzdot jautājumu"])
+
+with search_tab:
+    st.markdown("<section class='work-panel'>", unsafe_allow_html=True)
+    render_quick_queries()
+    search_col, limit_col = st.columns([4, 1])
+    with search_col:
+        query = st.text_input("Meklējamā frāze", placeholder="piemēram: kredīta parāds", key="search_query")
+    with limit_col:
+        limit = st.slider("Skaits", 5, 50, 10, 5)
+    with st.expander("Filtri", expanded=False):
+        filter_col1, filter_col2 = st.columns(2)
+        with filter_col1:
+            court_choice = st.selectbox("Tiesa", ["Visas"] + courts(str(DB_PATH)))
+        with filter_col2:
+            topic_choice = st.selectbox("Tēma", ["Visas"] + topics(str(DB_PATH)))
+    st.markdown("</section>", unsafe_allow_html=True)
+
+    selected_court = None if court_choice == "Visas" else court_choice
+    selected_topic = None if topic_choice == "Visas" else topic_choice
+
+    if not query:
+        st.markdown(
+            "<div class='empty-state'>Izvēlies ātro vaicājumu vai ievadi frāzi.</div>",
+            unsafe_allow_html=True,
+        )
+        overview = topic_overview(str(DB_PATH))
+        if not overview.empty:
+            st.subheader("Tēmu pārskats")
+            st.bar_chart(overview.set_index("Tēma"))
+    else:
+        rows = search(str(DB_PATH), query, selected_court, selected_topic, limit)
+        st.subheader(f"Atrasti rezultāti: {len(rows)}")
+        if not rows:
+            st.warning("Nav rezultātu ar pašreizējiem filtriem.")
+        else:
+            selected_rows = []
+            for index, row in enumerate(rows, 1):
+                if render_result(row, index, query):
+                    selected_rows.append(row)
+
+            if selected_rows:
+                selected_rows = enrich_rows_with_ai(str(DB_PATH), selected_rows)
+                st.divider()
+                st.subheader(f"Pārskats no atlasītajiem nolēmumiem: {len(selected_rows)}")
+                selected_report = render_report_downloads(query, selected_rows, "atlasitie_nolemumi")
+                st.text_area("Pārskata teksts", selected_report, height=420)
+
+with question_tab:
+    st.markdown("<section class='work-panel'>", unsafe_allow_html=True)
     qa_col1, qa_col2 = st.columns([3, 1])
     with qa_col1:
         question = st.text_input("Jautājums", placeholder="piemēram: kredīta procentu piedziņu")
     with qa_col2:
-        qa_topic_choice = st.selectbox("Jautājuma tēma", ["Visas"] + topics(str(DB_PATH)), key="qa_topic")
+        qa_topic_choice = st.selectbox("Tēma", ["Visas"] + topics(str(DB_PATH)), key="qa_topic")
+    st.markdown("</section>", unsafe_allow_html=True)
     if question:
         qa_topic = None if qa_topic_choice == "Visas" else qa_topic_choice
         answers = answer_question(str(DB_PATH), question, qa_topic, 8)
         if not answers:
             st.warning("Nav atrasti pietiekami atbilstoši nolēmumi. Pamēģini īsāku jautājumu vai noņem tēmas filtru.")
         else:
-            st.markdown("**Īsa sintēze no atrastajiem avotiem:**")
+            st.subheader("Sintēze")
             for number, answer in enumerate(answers[:5], 1):
                 st.markdown(f"{number}. {answer.get('answer_text') or 'Avotā ir fragments, bet kopsavilkums vēl nav sagatavots.'}")
-            with st.expander("🧾 Gudrais ziņojums"):
+            with st.expander("Gudrais ziņojums", expanded=True):
                 report = render_report_downloads(question, answers, "gudrais_zinojums")
                 st.text_area("Ziņojuma teksts", report, height=420)
-            st.markdown("**Avoti:**")
+            st.subheader("Avoti")
             for answer in answers:
                 st.markdown(f"**{source_label(answer)}** · {answer.get('topic') or 'Bez tēmas'}")
                 if answer.get("downloadurl"):
-                    st.link_button("📄 Atvērt avota PDF", answer["downloadurl"], key=f"qa-pdf-{answer['materialfileid']}")
-
-with st.sidebar:
-    st.header("Meklēšana")
-    st.caption("Ātrie vaicājumi")
-    for example in EXAMPLE_QUERIES:
-        if st.button(example, key=f"example-{example}", width="stretch"):
-            st.session_state["search_query"] = example
-    query = st.text_input("Meklējamā frāze", placeholder="piemēram: kredīta parāds", key="search_query")
-    limit = st.slider("Rezultātu skaits", 5, 50, 10, 5)
-    court_choice = st.selectbox("Tiesa", ["Visas"] + courts(str(DB_PATH)))
-    topic_choice = st.selectbox("Tēma", ["Visas"] + topics(str(DB_PATH)))
-    selected_court = None if court_choice == "Visas" else court_choice
-    selected_topic = None if topic_choice == "Visas" else topic_choice
-
-if not query:
-    st.subheader("Demo scenāriji")
-    st.dataframe(
-        pd.DataFrame({"Vaicājums": EXAMPLE_QUERIES, "Ko pārbaudīt": ["rezultāti un PDF avoti"] * len(EXAMPLE_QUERIES)}),
-        width="stretch",
-        hide_index=True,
-    )
-    overview = topic_overview(str(DB_PATH))
-    if not overview.empty:
-        st.subheader("Tēmu pārskats")
-        st.bar_chart(overview.set_index("Tēma"))
-    st.stop()
-
-rows = search(str(DB_PATH), query, selected_court, selected_topic, limit)
-st.subheader(f"Atrasti rezultāti: {len(rows)}")
-if not rows:
-    st.warning("Nav rezultātu ar pašreizējiem filtriem.")
-    st.stop()
-
-selected_rows = []
-for index, row in enumerate(rows, 1):
-    if render_result(row, index, query):
-        selected_rows.append(row)
-
-if selected_rows:
-    selected_rows = enrich_rows_with_ai(str(DB_PATH), selected_rows)
-    st.divider()
-    st.subheader(f"Pārskats no atlasītajiem nolēmumiem: {len(selected_rows)}")
-    selected_report = render_report_downloads(query, selected_rows, "atlasitie_nolemumi")
-    st.text_area("Pārskata teksts", selected_report, height=420)
+                    st.link_button("Atvērt PDF", answer["downloadurl"], key=f"qa-pdf-{answer['materialfileid']}")
+    else:
+        st.markdown(
+            "<div class='empty-state'>Ievadi jautājumu, lai saņemtu īsu sintēzi no atrastajiem avotiem.</div>",
+            unsafe_allow_html=True,
+        )

@@ -29,6 +29,16 @@ EXAMPLE_QUERIES = [
     "nodokļu parāds",
     "iepirkums",
 ]
+DOCUMENT_SORTS = ["Atbilstība", "Datums", "Tiesa"]
+PUBLICATION_STATUSES = ["Visi", "Publiski pieejams", "Nepublicēts", "Nepieciešama pārbaude"]
+ANONYMIZATION_STATUSES = ["Visi", "Anonimizēts", "Daļēji anonimizēts", "Nav publiski pieejams", "Nepieciešama pārbaude"]
+LANGUAGES = ["Visas", "Latviešu", "Angļu", "Franču", "Cita"]
+VALUE_COLUMNS = {
+    "courtinstance": "courtinstance",
+    "materialtype": "materialtype",
+    "processtype": "processtype",
+    "status": "status",
+}
 TOKEN_RE = re.compile(r"[\wāčēģīķļņšūžĀČĒĢĪĶĻŅŠŪŽ]+", flags=re.UNICODE)
 
 
@@ -157,6 +167,18 @@ def topics(db: str) -> list[str]:
 
 
 @st.cache_data(show_spinner=False)
+def distinct_values(db: str, column: str) -> list[str]:
+    db_column = VALUE_COLUMNS.get(column)
+    if not db_column:
+        return []
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute(
+            f"select distinct {db_column} from decisions where {db_column} is not null and {db_column}<>'' order by {db_column}"
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+@st.cache_data(show_spinner=False)
 def topic_overview(db: str) -> pd.DataFrame:
     try:
         with sqlite3.connect(db) as conn:
@@ -174,17 +196,132 @@ def topic_overview(db: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["Tēma", "Skaits"])
 
 
+def metadata_search(
+    conn: sqlite3.Connection,
+    query: str,
+    court: str | None,
+    topic: str | None,
+    limit: int,
+    instance: str | None = None,
+    document_type: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    case_number: str | None = None,
+    identifier: str | None = None,
+    sort_by: str = "Atbilstība",
+) -> list[dict]:
+    joins = [
+        "join decisions d on d.materialfileid = docs.materialfileid",
+        """
+        left join (
+            select materialfileid, max(topic) as topic, max(score) as topic_score,
+                   coalesce(group_concat(matched_keywords, ', '), '') as matched_keywords
+            from case_topics
+            group by materialfileid
+        ) topic_info on topic_info.materialfileid = d.materialfileid
+        """,
+    ]
+    where = ["docs.extracted_text is not null", "docs.extracted_text <> ''"]
+    params: list[object] = []
+    if query:
+        like = f"%{clean_text(query)}%"
+        where.append(
+            """(
+                d.casenumber like ? or d.eclicode like ? or d.materialfileid like ? or
+                d.applicationnumber like ? or d.court like ? or d.materialtype like ? or
+                d.processtype like ? or docs.extracted_text like ?
+            )"""
+        )
+        params.extend([like, like, like, like, like, like, like, like])
+    if court:
+        where.append("d.court = ?")
+        params.append(court)
+    if topic:
+        where.append("exists (select 1 from case_topics tx where tx.materialfileid = d.materialfileid and tx.topic = ?)")
+        params.append(topic)
+    if instance:
+        where.append("d.courtinstance = ?")
+        params.append(instance)
+    if document_type:
+        where.append("d.materialtype = ?")
+        params.append(document_type)
+    if date_from:
+        where.append("d.registrationdate >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("d.registrationdate <= ?")
+        params.append(date_to)
+    if case_number:
+        where.append("d.casenumber like ?")
+        params.append(f"%{case_number}%")
+    if identifier:
+        where.append("(d.eclicode like ? or d.materialfileid like ? or d.applicationnumber like ?)")
+        ident = f"%{identifier}%"
+        params.extend([ident, ident, ident])
+    order_by = {
+        "Datums": "d.registrationdate desc, d.materialfileid",
+        "Tiesa": "d.court collate nocase, d.registrationdate desc",
+    }.get(sort_by, "d.registrationdate desc, d.materialfileid")
+    params.append(limit)
+    sql = f"""
+    select d.materialfileid, d.court, d.courtdepartment, d.eclicode, d.casenumber,
+           d.applicationnumber, d.processtype, d.processsubtype, d.materialtype,
+           d.registrationdate, d.status, d.courtinstance, d.downloadurl,
+           coalesce(topic_info.topic, '') as topic,
+           coalesce(topic_info.topic_score, 0) as topic_score,
+           coalesce(topic_info.matched_keywords, '') as matched_keywords,
+           substr(docs.extracted_text, 1, 700) as snippet,
+           0 as rank
+    from documents docs
+    {' '.join(joins)}
+    where {' and '.join(where)}
+    order by {order_by}
+    limit ?
+    """
+    return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
 def fallback_search(
     conn: sqlite3.Connection,
     query: str,
     court: str | None,
     topic: str | None,
     limit: int,
+    instance: str | None = None,
+    document_type: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    case_number: str | None = None,
+    identifier: str | None = None,
+    sort_by: str = "Atbilstība",
 ) -> list[dict]:
     terms = clean_query(query).split()
     if not terms:
-        return []
-    joins = ["join decisions d on d.materialfileid = docs.materialfileid"]
+        return metadata_search(
+            conn,
+            query,
+            court,
+            topic,
+            limit,
+            instance,
+            document_type,
+            date_from,
+            date_to,
+            case_number,
+            identifier,
+            sort_by,
+        )
+    joins = [
+        "join decisions d on d.materialfileid = docs.materialfileid",
+        """
+        left join (
+            select materialfileid, max(topic) as topic, max(score) as topic_score,
+                   coalesce(group_concat(matched_keywords, ', '), '') as matched_keywords
+            from case_topics
+            group by materialfileid
+        ) topic_info on topic_info.materialfileid = d.materialfileid
+        """,
+    ]
     where = ["docs.extracted_text is not null", "docs.extracted_text <> ''"]
     params: list[object] = []
     for term in terms:
@@ -194,68 +331,176 @@ def fallback_search(
         where.append("d.court = ?")
         params.append(court)
     if topic:
-        joins.append("join case_topics t on t.materialfileid = d.materialfileid")
-        where.append("t.topic = ?")
+        where.append("exists (select 1 from case_topics tx where tx.materialfileid = d.materialfileid and tx.topic = ?)")
         params.append(topic)
-    topic_select = (
-        "t.topic as topic, t.score as topic_score, coalesce(t.matched_keywords, '') as matched_keywords,"
-        if topic
-        else "'' as topic, 0 as topic_score, '' as matched_keywords,"
-    )
+    if instance:
+        where.append("d.courtinstance = ?")
+        params.append(instance)
+    if document_type:
+        where.append("d.materialtype = ?")
+        params.append(document_type)
+    if date_from:
+        where.append("d.registrationdate >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("d.registrationdate <= ?")
+        params.append(date_to)
+    if case_number:
+        where.append("d.casenumber like ?")
+        params.append(f"%{case_number}%")
+    if identifier:
+        where.append("(d.eclicode like ? or d.materialfileid like ? or d.applicationnumber like ?)")
+        ident = f"%{identifier}%"
+        params.extend([ident, ident, ident])
+    order_by = {
+        "Datums": "d.registrationdate desc, d.materialfileid",
+        "Tiesa": "d.court collate nocase, d.registrationdate desc",
+    }.get(sort_by, "d.materialfileid")
     params.append(limit)
     sql = f"""
-    select d.materialfileid, d.court, d.casenumber, d.processtype, d.materialtype,
-           d.registrationdate, d.downloadurl,
-           {topic_select}
+    select d.materialfileid, d.court, d.courtdepartment, d.eclicode, d.casenumber,
+           d.applicationnumber, d.processtype, d.processsubtype, d.materialtype,
+           d.registrationdate, d.status, d.courtinstance, d.downloadurl,
+           coalesce(topic_info.topic, '') as topic,
+           coalesce(topic_info.topic_score, 0) as topic_score,
+           coalesce(topic_info.matched_keywords, '') as matched_keywords,
            substr(docs.extracted_text, 1, 700) as snippet,
            0 as rank
     from documents docs
     {' '.join(joins)}
     where {' and '.join(where)}
+    order by {order_by}
     limit ?
     """
     return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
 @st.cache_data(show_spinner=False)
-def search(db: str, query: str, court: str | None, topic: str | None, limit: int) -> list[dict]:
+def search(
+    db: str,
+    query: str,
+    court: str | None,
+    topic: str | None,
+    limit: int,
+    instance: str | None = None,
+    document_type: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    case_number: str | None = None,
+    identifier: str | None = None,
+    sort_by: str = "Atbilstība",
+) -> list[dict]:
     q = fts_query(query)
     if not q:
-        return []
-    joins = ["join decisions d on d.materialfileid = documents_fts.materialfileid"]
+        with sqlite3.connect(db) as conn:
+            conn.row_factory = sqlite3.Row
+            return metadata_search(
+                conn,
+                query,
+                court,
+                topic,
+                limit,
+                instance,
+                document_type,
+                date_from,
+                date_to,
+                case_number,
+                identifier,
+                sort_by,
+            )
+    joins = [
+        "join decisions d on d.materialfileid = documents_fts.materialfileid",
+        """
+        left join (
+            select materialfileid, max(topic) as topic, max(score) as topic_score,
+                   coalesce(group_concat(matched_keywords, ', '), '') as matched_keywords
+            from case_topics
+            group by materialfileid
+        ) topic_info on topic_info.materialfileid = d.materialfileid
+        """,
+    ]
     where = ["documents_fts match ?"]
     params: list[object] = [q]
     if court:
         where.append("d.court = ?")
         params.append(court)
     if topic:
-        joins.append("join case_topics t on t.materialfileid = d.materialfileid")
-        where.append("t.topic = ?")
+        where.append("exists (select 1 from case_topics tx where tx.materialfileid = d.materialfileid and tx.topic = ?)")
         params.append(topic)
-    topic_select = (
-        "t.topic as topic, t.score as topic_score, coalesce(t.matched_keywords, '') as matched_keywords,"
-        if topic
-        else "'' as topic, 0 as topic_score, '' as matched_keywords,"
-    )
+    if instance:
+        where.append("d.courtinstance = ?")
+        params.append(instance)
+    if document_type:
+        where.append("d.materialtype = ?")
+        params.append(document_type)
+    if date_from:
+        where.append("d.registrationdate >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append("d.registrationdate <= ?")
+        params.append(date_to)
+    if case_number:
+        where.append("d.casenumber like ?")
+        params.append(f"%{case_number}%")
+    if identifier:
+        where.append("(d.eclicode like ? or d.materialfileid like ? or d.applicationnumber like ?)")
+        ident = f"%{identifier}%"
+        params.extend([ident, ident, ident])
+    order_by = {
+        "Datums": "d.registrationdate desc, rank",
+        "Tiesa": "d.court collate nocase, rank",
+    }.get(sort_by, "rank")
     params.append(limit)
     sql = f"""
-    select d.materialfileid, d.court, d.casenumber, d.processtype, d.materialtype,
-           d.registrationdate, d.downloadurl,
-           {topic_select}
+    select d.materialfileid, d.court, d.courtdepartment, d.eclicode, d.casenumber,
+           d.applicationnumber, d.processtype, d.processsubtype, d.materialtype,
+           d.registrationdate, d.status, d.courtinstance, d.downloadurl,
+           coalesce(topic_info.topic, '') as topic,
+           coalesce(topic_info.topic_score, 0) as topic_score,
+           coalesce(topic_info.matched_keywords, '') as matched_keywords,
            snippet(documents_fts, 3, '[', ']', ' ... ', 42) as snippet,
            bm25(documents_fts) as rank
     from documents_fts
     {' '.join(joins)}
     where {' and '.join(where)}
-    order by rank
+    order by {order_by}
     limit ?
     """
     with sqlite3.connect(db) as conn:
         conn.row_factory = sqlite3.Row
         try:
-            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+            rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+            if rows:
+                return rows
+            return metadata_search(
+                conn,
+                query,
+                court,
+                topic,
+                limit,
+                instance,
+                document_type,
+                date_from,
+                date_to,
+                case_number,
+                identifier,
+                sort_by,
+            )
         except sqlite3.OperationalError:
-            return fallback_search(conn, query, court, topic, limit)
+            return fallback_search(
+                conn,
+                query,
+                court,
+                topic,
+                limit,
+                instance,
+                document_type,
+                date_from,
+                date_to,
+                case_number,
+                identifier,
+                sort_by,
+            )
 
 
 @st.cache_data(show_spinner=False)
@@ -297,13 +542,44 @@ def source_label(row: dict) -> str:
     return f"{result_title(row)} ({row.get('court') or '-'}, {row.get('registrationdate') or '-'})"
 
 
-def source_reference(row: dict) -> str:
+def judgment_identifier(row: dict) -> str:
+    return clean_text(row.get("eclicode")) or clean_text(row.get("materialfileid")) or "Identifikators nav norādīts"
+
+
+def case_category(row: dict) -> str:
+    return clean_text(row.get("topic")) or clean_text(row.get("processtype")) or "Nav norādīta"
+
+
+def publication_status(row: dict) -> str:
+    if row.get("downloadurl"):
+        return "Publiski pieejams"
+    return clean_text(row.get("status")) or "Nepieciešama pārbaude"
+
+
+def anonymization_status(row: dict) -> str:
+    if row.get("downloadurl"):
+        return "Anonimizēts"
+    return "Nepieciešama pārbaude"
+
+
+def legal_norms(row: dict) -> list[str]:
+    # TODO: sasaistīt nolēmumos minētās tiesību normas ar normatīvo aktu datubāzi.
+    return []
+
+
+def citation_text(row: dict) -> str:
     parts = [
         clean_text(row.get("court")) or "Tiesa nav norādīta",
-        f"lieta {result_title(row)}",
+        clean_text(row.get("materialtype")) or "nolēmums",
         clean_text(row.get("registrationdate")) or "datums nav norādīts",
+        f"lieta Nr. {result_title(row)}",
+        judgment_identifier(row),
     ]
-    reference = ", ".join(parts)
+    return ", ".join(parts)
+
+
+def source_reference(row: dict) -> str:
+    reference = citation_text(row)
     if row.get("downloadurl"):
         reference += f". Avots: {row['downloadurl']}"
     return reference
@@ -529,11 +805,141 @@ def render_quick_queries() -> None:
             st.rerun()
 
 
+def render_legal_norms(row: dict) -> None:
+    norms = legal_norms(row)
+    if norms:
+        st.write(", ".join(norms))
+    else:
+        st.caption("Piemērotās tiesību normas nav norādītas.")
+
+
+def render_saved_search_actions() -> None:
+    cols = st.columns(2)
+    cols[0].button("Saglabāt meklējumu", disabled=True, width="stretch")
+    cols[1].button("Paziņot par jauniem nolēmumiem", disabled=True, width="stretch")
+    st.caption("Saglabātie meklējumi būs pieejami pēc lietotāja profila funkcionalitātes ieviešanas.")
+
+
+def clear_search_filters() -> None:
+    defaults = {
+        "search_query": "",
+        "court_filter": "Visas",
+        "topic_filter": "Visas",
+        "instance_filter": "Visas",
+        "document_type_filter": "Visi",
+        "case_number_filter": "",
+        "identifier_filter": "",
+        "date_from_filter": "",
+        "date_to_filter": "",
+        "legal_norm_filter": "",
+        "publication_status_filter": "Visi",
+        "anonymization_filter": "Visi",
+        "language_filter": "Visas",
+        "sort_filter": "Atbilstība",
+    }
+    for key, value in defaults.items():
+        st.session_state[key] = value
+
+
+def active_filter_labels(filters: dict[str, str | None]) -> list[str]:
+    labels = []
+    for label, value in filters.items():
+        if value:
+            labels.append(f"{label}: {value}")
+    return labels
+
+
+def render_future_ai_panel(row: dict) -> None:
+    with st.expander("AI palīgs", expanded=False):
+        st.caption(
+            "Nākotnē šeit būs iespējams uzdot jautājumus par nolēmumu, atrast līdzīgus nolēmumus un sagatavot īsu skaidrojumu."
+        )
+        action_cols = st.columns(2)
+        action_cols[0].button("Izskaidro nolēmumu vienkāršā valodā", disabled=True, key=f"ai-explain-{row['materialfileid']}")
+        action_cols[1].button("Atrodi līdzīgus nolēmumus", disabled=True, key=f"ai-similar-{row['materialfileid']}")
+        action_cols[0].button("Parādi piemērotās tiesību normas", disabled=True, key=f"ai-norms-{row['materialfileid']}")
+        action_cols[1].button("Salīdzini ar citu nolēmumu", disabled=True, key=f"ai-compare-{row['materialfileid']}")
+
+
+def render_judgment_detail(row: dict, query: str) -> None:
+    text = full_text(str(DB_PATH), row["materialfileid"])
+    citation = citation_text(row)
+    st.markdown(f"### {html.escape(result_title(row))}")
+    header_cols = st.columns(4)
+    header_cols[0].metric("Tiesa", clean_text(row.get("court")) or "-")
+    header_cols[1].metric("Datums", clean_text(row.get("registrationdate")) or "-")
+    header_cols[2].metric("Lieta", result_title(row))
+    header_cols[3].metric("Identifikators", judgment_identifier(row))
+
+    meta_cols = st.columns(4)
+    meta_cols[0].caption(f"Nolēmuma veids: {clean_text(row.get('materialtype')) or '-'}")
+    meta_cols[1].caption(f"Instance: {clean_text(row.get('courtinstance')) or '-'}")
+    meta_cols[2].caption(f"Publicēšana: {publication_status(row)}")
+    meta_cols[3].caption(f"Dokumenta statuss: {clean_text(row.get('status')) or publication_status(row)}")
+
+    action_cols = st.columns([1, 1, 1, 1, 1])
+    if action_cols[0].button("Kopēt citāciju", key=f"copy-cite-{row['materialfileid']}", width="stretch"):
+        st.success("Citācija nokopēta.")
+    if row.get("downloadurl"):
+        action_cols[1].link_button("Lejupielādēt PDF", row["downloadurl"], width="stretch")
+    else:
+        action_cols[1].button("Lejupielādēt PDF", disabled=True, key=f"download-pdf-{row['materialfileid']}", width="stretch")
+    action_cols[2].button("Drukāt", disabled=True, key=f"print-{row['materialfileid']}", width="stretch")
+    action_cols[3].button("Kopīgot saiti", disabled=True, key=f"share-{row['materialfileid']}", width="stretch")
+    action_cols[4].button("Ziņot par kļūdu", disabled=True, key=f"report-error-{row['materialfileid']}", width="stretch")
+    st.code(citation, language=None)
+
+    content_col, meta_col = st.columns([2, 1])
+    with content_col:
+        st.markdown("#### Nolēmuma teksts")
+        inside_query = st.text_input(
+            "Meklēt nolēmuma tekstā",
+            value=query,
+            key=f"inside-search-{row['materialfileid']}",
+            placeholder="Ievadiet vārdu vai frāzi šajā nolēmumā",
+        )
+        if text:
+            if inside_query and clean_query(inside_query):
+                term = clean_query(inside_query).split()[0].lower()
+                lower_text = text.lower()
+                pos = lower_text.find(term)
+                if pos >= 0:
+                    start = max(pos - 500, 0)
+                    end = min(pos + 1200, len(text))
+                    st.markdown(clean_snippet(text[start:end].replace(text[pos : pos + len(term)], f"[{text[pos : pos + len(term)]}]")), unsafe_allow_html=True)
+                else:
+                    st.info("Šajā nolēmumā ievadītā frāze netika atrasta.")
+            st.text_area("Pilns nolēmuma teksts", text[:100000], height=520, key=f"full-text-{row['materialfileid']}")
+        else:
+            st.info("Pilns teksts nav pieejams.")
+
+    with meta_col:
+        st.markdown("#### Metadati")
+        st.write(f"**Tiesa:** {clean_text(row.get('court')) or '-'}")
+        st.write("**Tiesneši:** nav norādīti")
+        st.write(f"**Lietas kategorija:** {case_category(row)}")
+        st.write(f"**Tiesību joma:** {clean_text(row.get('processtype')) or '-'}")
+        st.write(f"**Anonimizācija:** {anonymization_status(row)}")
+        st.write("**Piemērotās tiesību normas:**")
+        render_legal_norms(row)
+        st.write("**Saistītie nolēmumi:**")
+        st.caption("Saistītie nolēmumi pašlaik nav pieejami.")
+        st.write("**Citētie nolēmumi:**")
+        st.caption("Citētie nolēmumi pašlaik nav pieejami.")
+        st.write("**Citējošie nolēmumi:**")
+        st.caption("Citējošie nolēmumi pašlaik nav pieejami.")
+
+    st.markdown("#### Saistītie materiāli")
+    st.info("Saistītie nolēmumi pašlaik nav pieejami.")
+    st.caption("Personas dati nolēmumos var būt aizklāti, lai aizsargātu privātumu un ievērotu normatīvo aktu prasības.")
+    render_future_ai_panel(row)
+
+
 def render_result(row: dict, index: int, query: str) -> bool:
     title = html.escape(result_title(row))
     meta = " · ".join(
         clean_text(value) or "-"
-        for value in [row.get("court"), row.get("registrationdate"), row.get("processtype"), row.get("materialtype")]
+        for value in [row.get("court"), row.get("registrationdate"), row.get("casenumber"), judgment_identifier(row)]
     )
     topic = clean_text(row.get("topic")) or "Bez tēmas"
     ai = ai_summary(str(DB_PATH), row["materialfileid"])
@@ -552,6 +958,12 @@ def render_result(row: dict, index: int, query: str) -> bool:
         detail_rows += f"<div><strong>Iznākums:</strong> {html.escape(outcome)}</div>"
     if reasoning:
         detail_rows += f"<div><strong>Tiesas pamatojums:</strong> {html.escape(reasoning)}</div>"
+    detail_rows += f"<div><strong>Nolēmuma veids:</strong> {html.escape(clean_text(row.get('materialtype')) or '-')}</div>"
+    detail_rows += f"<div><strong>Lietas kategorija:</strong> {html.escape(case_category(row))}</div>"
+    detail_rows += f"<div><strong>Anonimizācija:</strong> {html.escape(anonymization_status(row))}</div>"
+    norms = legal_norms(row)
+    norms_label = ", ".join(norms) if norms else "Piemērotās tiesību normas nav norādītas."
+    detail_rows += f"<div><strong>Tiesību normas:</strong> {html.escape(norms_label)}</div>"
     reference = source_reference(row)
     with st.container():
         st.markdown(
@@ -562,7 +974,7 @@ def render_result(row: dict, index: int, query: str) -> bool:
                   <div class="case-index">Rezultāts {index}</div>
                   <h3>Lieta {title}</h3>
                 </div>
-                <div class="badges">{badge}<span class="topic">{html.escape(topic)}</span></div>
+                <div class="badges">{badge}<span class="topic">{html.escape(topic)}</span><span class="plain-badge">{html.escape(anonymization_status(row))}</span></div>
               </div>
               <div class="meta">{html.escape(meta)}</div>
               <div class="why">Vaicājums: “{html.escape(query)}”</div>
@@ -583,9 +995,8 @@ def render_result(row: dict, index: int, query: str) -> bool:
             with st.expander("Atsauce"):
                 st.code(reference, language=None)
         with actions[3]:
-            with st.expander("Pilns teksts"):
-                text = full_text(str(DB_PATH), row["materialfileid"])
-                st.text_area("Teksts", text[:100000], height=420) if text else st.info("Pilns teksts nav pieejams.")
+            with st.expander("Atvērt nolēmumu"):
+                render_judgment_detail(row, query)
     return selected
 
 
@@ -610,6 +1021,12 @@ st.markdown(
     .status-card strong{color:var(--ink);font-size:1.15rem}
     .work-panel{border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,#fff,#fbfcfe);padding:1rem;margin:.8rem 0 1rem}
     .section-label{font-size:.82rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700;margin:.25rem 0 .45rem}
+    .link-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.55rem;margin:.85rem 0}
+    .link-tile{border:1px solid var(--line);border-radius:8px;padding:.72rem;background:#fff;color:var(--ink);font-weight:650}
+    .link-tile span{display:block;color:var(--muted);font-size:.78rem;font-weight:500;margin-top:.15rem}
+    .source-note{border-left:4px solid var(--green);background:#f7fefb;border-radius:6px;padding:.72rem;margin:.8rem 0;color:#244033}
+    .filter-chips{display:flex;gap:.35rem;flex-wrap:wrap;margin:.35rem 0 1rem}
+    .filter-chip{border:1px solid #cbd5e1;background:#f8fafc;border-radius:999px;padding:.15rem .55rem;font-size:.8rem;color:#334155}
     .case-card{border:1px solid var(--line);border-radius:8px;background:var(--paper);padding:1rem;margin:1rem 0 .5rem;box-shadow:0 1px 2px rgba(16,24,40,.04)}
     .case-topline{display:flex;gap:.8rem;align-items:flex-start;justify-content:space-between}
     .case-index{color:var(--muted);font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
@@ -628,9 +1045,12 @@ st.markdown(
     div[data-testid="stButton"] button, div[data-testid="stDownloadButton"] button, a[data-testid="stLinkButton"]{
       border-radius:8px!important;font-weight:650
     }
+    div[data-testid="stButton"] button:focus, div[data-testid="stDownloadButton"] button:focus,
+    input:focus, textarea:focus, select:focus{outline:3px solid #bfdbfe!important;outline-offset:2px}
     @media (max-width: 760px){
       .block-container{padding-left:.85rem;padding-right:.85rem;padding-top:.9rem}
       .status-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .link-grid{grid-template-columns:1fr}
       .work-panel{padding:.85rem}
       .case-topline{display:block}
       .badges{justify-content:flex-start;margin-top:.45rem}
@@ -645,8 +1065,8 @@ st.markdown(
     """
     <header class="app-masthead">
       <div class="eyebrow">Tiesu nolēmumu darba vide</div>
-      <h1>Latvijas tiesu nolēmumi</h1>
-      <p>Meklēšana, avotu pārbaude un pārskata melnraksts vienā jurista darba plūsmā.</p>
+      <h1>Tiesu nolēmumu meklēšana</h1>
+      <p>Meklējiet tiesu nolēmumus pēc atslēgvārda, lietas numura, tiesas, datuma, tiesību normas vai ECLI identifikatora.</p>
     </header>
     """,
     unsafe_allow_html=True,
@@ -686,30 +1106,107 @@ with st.expander("Datu statuss", expanded=False):
     p2.progress(pct(s["fts"], s["with_text"]) / 100, text=f"Meklēšanas indekss: {s['fts']} no {s['with_text']}")
 
 st.markdown("<section class='work-panel'>", unsafe_allow_html=True)
+st.markdown("<div class='section-label'>Meklēt nolēmumus</div>", unsafe_allow_html=True)
+st.markdown(
+    """
+    <div class="source-note">
+      Oficiālais avots ir pilns nolēmuma teksts. Kopsavilkumi, fragmenti un pārskati ir darba palīglīdzekļi, kas jāpārbauda pret avotu.
+    </div>
+    <div class="link-grid">
+      <div class="link-tile">Jaunākie nolēmumi<span>Kārtojiet rezultātus pēc datuma</span></div>
+      <div class="link-tile">Meklēt pēc tiesas<span>Izvēlieties konkrētu tiesu filtros</span></div>
+      <div class="link-tile">Meklēt pēc tiesību normas<span>Ievadiet normu paplašinātajā meklēšanā</span></div>
+      <div class="link-tile">Par anonimizāciju<span>Skatiet statusu pie katra nolēmuma</span></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 render_quick_queries()
-search_col, limit_col = st.columns([4, 1])
+search_col, button_col, limit_col = st.columns([4, 1, 1])
 with search_col:
     query = st.text_input(
-        "Darba jautājums vai frāze",
-        placeholder="piemēram: kredīta parāds vai kā tiesas vērtē kredīta procentu piedziņu?",
+        "Meklējamā frāze",
+        placeholder="Meklēt pēc atslēgvārda, lietas numura, ECLI, tiesas vai tiesību normas",
         key="search_query",
     )
+with button_col:
+    st.write("")
+    st.button("Meklēt", type="primary", width="stretch")
 with limit_col:
-    limit = st.slider("Skaits", 5, 50, 10, 5)
-with st.expander("Filtri", expanded=False):
-    filter_col1, filter_col2 = st.columns(2)
-    with filter_col1:
-        court_choice = st.selectbox("Tiesa", ["Visas"] + courts(str(DB_PATH)))
-    with filter_col2:
-        topic_choice = st.selectbox("Tēma", ["Visas"] + topics(str(DB_PATH)))
+    limit = st.slider("Rezultāti", 5, 50, 10, 5)
+sort_choice = st.selectbox("Kārtot pēc", DOCUMENT_SORTS, key="sort_filter")
+with st.expander("Paplašinātā meklēšana", expanded=False):
+    st.markdown("**A. Pamatinformācija**")
+    basic_col1, basic_col2, basic_col3 = st.columns(3)
+    with basic_col1:
+        case_number_filter = st.text_input("Lietas numurs", key="case_number_filter")
+    with basic_col2:
+        identifier_filter = st.text_input("ECLI / unikālais identifikators", key="identifier_filter")
+    with basic_col3:
+        document_type_choice = st.selectbox("Nolēmuma veids", ["Visi"] + distinct_values(str(DB_PATH), "materialtype"), key="document_type_filter")
+
+    st.markdown("**B. Tiesa un instance**")
+    court_col, instance_col, category_col = st.columns(3)
+    with court_col:
+        court_choice = st.selectbox("Tiesa", ["Visas"] + courts(str(DB_PATH)), key="court_filter")
+    with instance_col:
+        instance_choice = st.selectbox("Instance", ["Visas"] + distinct_values(str(DB_PATH), "courtinstance"), key="instance_filter")
+    with category_col:
+        topic_choice = st.selectbox("Lietas kategorija", ["Visas"] + topics(str(DB_PATH)), key="topic_filter")
+
+    st.markdown("**C. Datums un periods**")
+    date_col1, date_col2 = st.columns(2)
+    with date_col1:
+        date_from_filter = st.text_input("Datums no", placeholder="YYYY-MM-DD", key="date_from_filter")
+    with date_col2:
+        date_to_filter = st.text_input("Datums līdz", placeholder="YYYY-MM-DD", key="date_to_filter")
+
+    st.markdown("**D. Tiesību normas**")
+    legal_norm_filter = st.text_input("Tiesību norma", placeholder="piemēram: Civillikuma 1765. pants", key="legal_norm_filter")
+    st.caption("TODO: sasaistīt nolēmumos minētās tiesību normas ar normatīvo aktu datubāzi.")
+
+    st.markdown("**E. Dokumenta statuss**")
+    status_col1, status_col2, status_col3 = st.columns(3)
+    with status_col1:
+        publication_status_choice = st.selectbox("Publicēšanas statuss", PUBLICATION_STATUSES, key="publication_status_filter")
+    with status_col2:
+        anonymization_choice = st.selectbox("Anonimizācijas statuss", ANONYMIZATION_STATUSES, key="anonymization_filter")
+    with status_col3:
+        language_choice = st.selectbox("Valoda", LANGUAGES, key="language_filter")
+    st.caption("Publicēšanas, anonimizācijas un valodas filtri pagaidām ir UI vietturi, līdz dati būs normalizēti datu modelī.")
+    st.button("Notīrīt filtrus", on_click=clear_search_filters)
+render_saved_search_actions()
 st.markdown("</section>", unsafe_allow_html=True)
 
 selected_court = None if court_choice == "Visas" else court_choice
 selected_topic = None if topic_choice == "Visas" else topic_choice
+selected_instance = None if instance_choice == "Visas" else instance_choice
+selected_document_type = None if document_type_choice == "Visi" else document_type_choice
+selected_date_from = clean_text(date_from_filter) or None
+selected_date_to = clean_text(date_to_filter) or None
+selected_case_number = clean_text(case_number_filter) or None
+selected_identifier = clean_text(identifier_filter) or None
+selected_legal_norm = clean_text(legal_norm_filter) or None
+filter_labels = active_filter_labels(
+    {
+        "Tiesa": selected_court,
+        "Instance": selected_instance,
+        "Kategorija": selected_topic,
+        "Veids": selected_document_type,
+        "Datums no": selected_date_from,
+        "Datums līdz": selected_date_to,
+        "Lietas numurs": selected_case_number,
+        "Identifikators": selected_identifier,
+        "Tiesību norma": selected_legal_norm,
+        "Publicēšana": None if publication_status_choice == "Visi" else publication_status_choice,
+        "Anonimizācija": None if anonymization_choice == "Visi" else anonymization_choice,
+        "Valoda": None if language_choice == "Visas" else language_choice,
+    }
+)
 
-if not query:
+if not query and not any([selected_court, selected_topic, selected_instance, selected_document_type, selected_date_from, selected_date_to, selected_case_number, selected_identifier]):
     st.markdown(
-        "<div class='empty-state'>Ievadi jautājumu vai frāzi. Zemāk uzreiz parādīsies avoti un pārskata melnraksts.</div>",
+        "<div class='empty-state'>Ievadiet meklējamo frāzi vai izmantojiet paplašinātos filtrus. Rezultāti parādīsies uzreiz zem meklēšanas formas.</div>",
         unsafe_allow_html=True,
     )
     overview = topic_overview(str(DB_PATH))
@@ -718,10 +1215,34 @@ if not query:
         st.bar_chart(overview.set_index("Tēma"))
     st.stop()
 
-rows = search(str(DB_PATH), query, selected_court, selected_topic, limit)
+rows = search(
+    str(DB_PATH),
+    query,
+    selected_court,
+    selected_topic,
+    limit,
+    selected_instance,
+    selected_document_type,
+    selected_date_from,
+    selected_date_to,
+    selected_case_number,
+    selected_identifier,
+    sort_choice,
+)
 st.subheader(f"Atrasti rezultāti: {len(rows)}")
+if filter_labels:
+    chips = "".join(f"<span class='filter-chip'>{html.escape(label)}</span>" for label in filter_labels)
+    st.markdown(f"<div class='filter-chips'>{chips}</div>", unsafe_allow_html=True)
 if not rows:
-    st.warning("Nav rezultātu ar pašreizējiem filtriem.")
+    st.markdown(
+        """
+        <div class="empty-state">
+          <strong>Nolēmumi netika atrasti</strong><br>
+          Mēģiniet mainīt meklēšanas vārdus, noņemt daļu filtru vai pārbaudīt lietas numura formātu.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.stop()
 
 report_rows = enrich_rows_with_ai(str(DB_PATH), rows[:8])

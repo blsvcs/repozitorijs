@@ -1122,16 +1122,19 @@ st.markdown(
     unsafe_allow_html=True,
 )
 render_quick_queries()
-search_col, button_col, limit_col = st.columns([4, 1, 1])
-with search_col:
-    query = st.text_input(
-        "Meklējamā frāze",
-        placeholder="Meklēt pēc atslēgvārda, lietas numura, ECLI, tiesas vai tiesību normas",
-        key="search_query",
-    )
-with button_col:
-    st.write("")
-    st.button("Meklēt", type="primary", width="stretch")
+search_form_col, limit_col = st.columns([5, 1])
+with search_form_col:
+    with st.form("search_form", clear_on_submit=False, enter_to_submit=True, border=False):
+        search_col, button_col = st.columns([4, 1])
+        with search_col:
+            query = st.text_input(
+                "Meklējamā frāze",
+                placeholder="Meklēt pēc atslēgvārda, lietas numura, ECLI, tiesas vai tiesību normas",
+                key="search_query",
+            )
+        with button_col:
+            st.write("")
+            st.form_submit_button("Meklēt", type="primary", width="stretch")
 with limit_col:
     limit = st.slider("Rezultāti", 5, 50, 10, 5)
 sort_choice = st.selectbox("Kārtot pēc", DOCUMENT_SORTS, key="sort_filter")

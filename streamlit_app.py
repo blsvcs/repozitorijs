@@ -877,17 +877,22 @@ def render_judgment_detail(row: dict, query: str) -> None:
     meta_cols[2].caption(f"Publicēšana: {publication_status(row)}")
     meta_cols[3].caption(f"Dokumenta statuss: {clean_text(row.get('status')) or publication_status(row)}")
 
-    action_cols = st.columns([1, 1, 1, 1, 1])
-    if action_cols[0].button("Kopēt citāciju", key=f"copy-cite-{row['materialfileid']}", width="stretch"):
-        st.success("Citācija nokopēta.")
+    action_cols = st.columns([1, 1, 1, 1])
     if row.get("downloadurl"):
-        action_cols[1].link_button("Lejupielādēt PDF", row["downloadurl"], width="stretch")
+        action_cols[0].link_button("Lejupielādēt PDF", row["downloadurl"], width="stretch")
     else:
-        action_cols[1].button("Lejupielādēt PDF", disabled=True, key=f"download-pdf-{row['materialfileid']}", width="stretch")
-    action_cols[2].button("Drukāt", disabled=True, key=f"print-{row['materialfileid']}", width="stretch")
-    action_cols[3].button("Kopīgot saiti", disabled=True, key=f"share-{row['materialfileid']}", width="stretch")
-    action_cols[4].button("Ziņot par kļūdu", disabled=True, key=f"report-error-{row['materialfileid']}", width="stretch")
-    st.code(citation, language=None)
+        action_cols[0].button("Lejupielādēt PDF", disabled=True, key=f"download-pdf-{row['materialfileid']}", width="stretch")
+    action_cols[1].button("Drukāt", disabled=True, key=f"print-{row['materialfileid']}", width="stretch")
+    action_cols[2].button("Kopīgot saiti", disabled=True, key=f"share-{row['materialfileid']}", width="stretch")
+    action_cols[3].button("Ziņot par kļūdu", disabled=True, key=f"report-error-{row['materialfileid']}", width="stretch")
+
+    with st.expander("Avota dati un citēšana", expanded=True):
+        st.caption("Citāciju var pārkopēt no lauka zemāk. Oficiālais avots ir pilns nolēmuma teksts un PDF fails, ja tas ir pieejams.")
+        st.code(citation, language=None)
+        source_cols = st.columns(3)
+        source_cols[0].write(f"**Materiāla ID:** `{clean_text(row.get('materialfileid')) or '-'}`")
+        source_cols[1].write(f"**ECLI:** `{clean_text(row.get('eclicode')) or '-'}`")
+        source_cols[2].write(f"**Lietas numurs:** `{result_title(row)}`")
 
     content_col, meta_col = st.columns([2, 1])
     with content_col:
